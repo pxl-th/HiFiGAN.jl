@@ -1,9 +1,11 @@
 module HiFiGAN
 
-# using AMDGPU
-using CUDA
+using AMDGPU
+# using CUDA
 using KernelAbstractions
 using NNlib
+using Makie
+using CairoMakie
 using Flux
 using FileIO
 using FLAC
@@ -21,19 +23,23 @@ include("discriminator.jl")
 include("loss.jl")
 
 function main()
-    output_dir = "/home/pxl-th/code/HiFiGAN.jl/runs"
+    CairoMakie.activate!()
+
+    output_dir = joinpath(homedir(), "code", "HiFiGAN.jl", "runs")
     states_dir = joinpath(output_dir, "states")
     val_dir = joinpath(output_dir, "validations")
+    vis_dir = joinpath(output_dir, "visualizations")
+
     isdir(output_dir) || mkpath(output_dir)
     isdir(states_dir) || mkpath(states_dir)
-    isdir(val_dir) || mkpath(states_dir)
+    isdir(val_dir) || mkpath(val_dir)
+    isdir(vis_dir) || mkpath(vis_dir)
 
-    # train_files, test_files = load_files("/home/pxlth/Downloads/LJSpeech-1.1/metadata.csv")
-    train_files, test_files = load_files("/home/pxl-th/code/datasets/LJSpeech-1.1/metadata.csv")
+    train_files, test_files = load_files(joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv"))
     train_dataset = LJDataset(train_files)
     test_dataset = LJDataset(test_files)
 
-    train_loader = MLUtils.DataLoader(train_dataset; batchsize=1, shuffle=true)
+    train_loader = MLUtils.DataLoader(train_dataset; batchsize=8, shuffle=true)
     test_loader = MLUtils.DataLoader(test_dataset; batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
@@ -53,6 +59,9 @@ function main()
     opt_period_discriminator = Flux.setup(AdamW(2e-4), period_discriminator)
     opt_scale_discriminator = Flux.setup(AdamW(2e-4), scale_discriminator)
 
+    vlosses = Float32[]
+
+    # Try loading latest checkpoint.
     states = readdir(states_dir)
     if !isempty(states)
         states = sort(states; by=i -> parse(Int, split(i, "-")[2]))
@@ -67,6 +76,8 @@ function main()
         Flux.loadmodel!(generator, ckpt["generator"])
         Flux.loadmodel!(period_discriminator, ckpt["period_discriminator"])
         Flux.loadmodel!(scale_discriminator, ckpt["scale_discriminator"])
+
+        vlosses = ckpt["vlosses"]
     end
 
     generator = generator |> gpu
@@ -86,6 +97,20 @@ function main()
     mel_transform = gpu(train_dataset.mel_transform_loss)
     gloss, dloss, vloss = 0f0, 0f0, 0f0
 
+    # Run train step, but do not update the params.
+    # This is done to precompile kernels and reduce memory pressure.
+    @info "Precompiling..."
+    for batch in test_loader
+        train_step(batch,
+            generator, period_discriminator, scale_discriminator;
+            opt_generator, opt_period_discriminator, opt_scale_discriminator,
+            mel_transform, update=false)
+        break
+    end
+    GC.gc(false)
+    GC.gc(true)
+    AMDGPU.HIP.reclaim()
+
     @info "Training for $epochs epochs..."
     for epoch in (max(1, last_epoch)):epochs
         bar = Progress(length(train_loader); desc="[$epoch / $epochs] Training")
@@ -97,7 +122,8 @@ function main()
 
             if steps % test_step == 0
                 vloss = validation_step(generator, test_loader;
-                    mel_transform, val_dir, current_step=steps)
+                    mel_transform, val_dir, vis_dir, current_step=steps)
+                push!(vlosses, vloss)
             end
 
             if steps % save_step == 0
@@ -110,7 +136,12 @@ function main()
                     opt_period_discriminator=cpu(opt_period_discriminator),
                     opt_scale_discriminator=cpu(opt_scale_discriminator),
                     last_epoch,
+                    vlosses,
                 )
+                if length(vlosses) > 1
+                    fig = lines(vlosses)
+                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
+                end
             end
 
             next!(bar; showvalues=[(:GLoss, gloss), (:DLoss, dloss), (:VLoss, vloss)])
@@ -118,16 +149,13 @@ function main()
         end
         last_epoch = epoch
     end
-
-    # TODO plot loss over time and save
-    # TODO visualize mel spectrograms?
     return
 end
 
 function train_step(
     batch, generator, period_discriminator, scale_discriminator;
     opt_generator, opt_period_discriminator, opt_scale_discriminator,
-    mel_transform,
+    mel_transform, update::Bool = true,
 )
     wavs, mel, mel_loss = gpu.(batch)
     wavs_gen = nothing
@@ -155,7 +183,7 @@ function train_step(
 
         45f0 * loss_mel + loss_period + loss_scale
     end
-    Flux.update!(opt_generator, generator, ∇[1])
+    update && Flux.update!(opt_generator, generator, ∇[1])
 
     # Discriminators step.
     dloss, ∇ = Flux.withgradient(
@@ -171,15 +199,17 @@ function train_step(
 
         period_loss + scale_loss
     end
-    Flux.update!(opt_period_discriminator, period_discriminator, ∇[1])
-    Flux.update!(opt_scale_discriminator, scale_discriminator, ∇[2])
+    if update
+        Flux.update!(opt_period_discriminator, period_discriminator, ∇[1])
+        Flux.update!(opt_scale_discriminator, scale_discriminator, ∇[2])
+    end
 
     return gloss, dloss
 end
 
 function validation_step(
     generator, test_loader;
-    mel_transform, val_dir, current_step::Int,
+    mel_transform, val_dir, vis_dir, current_step::Int,
 )
     total_loss = 0f0
     @showprogress desc="Validating" for (i, batch) in enumerate(test_loader)
@@ -194,9 +224,16 @@ function validation_step(
             if current_step == 0
                 save(joinpath(val_dir, "real-$current_step-$i.flac"),
                     reshape(cpu(wavs), size(wavs, 1), 1), 16000)
+
+                fig = heatmap(NNlib.power_to_db(cpu(mel_loss))[:, :, 1])
+                save(joinpath(vis_dir, "mel-real-$current_step-$i.png"), fig)
             end
+
             save(joinpath(val_dir, "gen-$current_step-$i.flac"),
                 reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
+
+            fig = heatmap(NNlib.power_to_db(cpu(ŷ_mel))[:, :, 1])
+            save(joinpath(vis_dir, "mel-gen-$current_step-$i.png"), fig)
         end
     end
     return total_loss
