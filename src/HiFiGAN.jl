@@ -191,57 +191,15 @@ function validation_step(
         total_loss += Flux.mae(ŷ_mel, mel_loss)
 
         if i ≤ 4
-            save(joinpath(val_dir, "real-$current_step-$i.flac"), reshape(cpu(wavs), size(wavs, 1), 1), 16000)
-            save(joinpath(val_dir, "gen-$current_step-$i.flac"), reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
+            if current_step == 0
+                save(joinpath(val_dir, "real-$current_step-$i.flac"),
+                    reshape(cpu(wavs), size(wavs, 1), 1), 16000)
+            end
+            save(joinpath(val_dir, "gen-$current_step-$i.flac"),
+                reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
         end
     end
     return total_loss
-end
-
-function tt()
-    block = ResBlock2(; channels=2, kernel=3, dilation=[1, 2])
-    x = rand(Float32, (1024, 2, 1))
-    y = block(x)
-    @show size(y)
-
-    g = Generator(;
-        upsample_kernels=[16, 16, 8],
-        upsample_rates=[8, 8, 4],
-        upsample_initial_channels=256,
-
-        resblock_kernels=[3, 5, 7],
-        resblock_dilations=[[1, 2], [2, 6], [3, 12]],
-    )
-    x = rand(Float32, 32, 80, 1)
-    y = g(x)
-    @show size(y)
-
-    loss, grad = Flux.withgradient(g) do g
-        sum(g(x))
-    end
-    @show loss
-    return
-end
-
-function pp()
-    x = rand(Float32, 8192, 1, 1)
-    mpd = MultiPeriodDiscriminator()
-    msd = MultiScaleDiscriminator()
-
-    maps = mpd(x)
-    gen_maps = mpd(x)
-
-    @show discriminator_loss(maps, gen_maps)
-    @show generator_loss(gen_maps)
-    @show feature_loss(maps, gen_maps)
-
-    maps = msd(x)
-    gen_maps = msd(x)
-
-    @show discriminator_loss(maps, gen_maps)
-    @show generator_loss(gen_maps)
-    @show feature_loss(maps, gen_maps)
-    return
 end
 
 end
