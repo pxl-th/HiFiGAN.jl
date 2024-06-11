@@ -46,6 +46,18 @@ function Base.getindex(d::LJDataset, i::Integer)
     return wav, mel_spec, mel_spec_loss
 end
 
+MLUtils.numobs(d::LJDataset) = length(d)
+
+MLUtils.getobs(d::LJDataset, i::Integer) = d[i]
+
+function MLUtils.getobs(d::LJDataset, ids)
+    batch = [d[i] for i in ids]
+    wavs = cat([b[1] for b in batch]...; dims=3)
+    mel_specs = cat([b[2] for b in batch]...; dims=3)
+    mel_specs_loss = cat([b[3] for b in batch]...; dims=3)
+    return wavs, mel_specs, mel_specs_loss
+end
+
 function load_files(data_path::String; train_split::Real = 0.9)
     base_dir = dirname(data_path)
 

@@ -27,7 +27,7 @@ function (sp::Spectrogram)(waveform)
     get_backend(waveform) != get_backend(sp.window) && throw(ArgumentError(
         "`waveform` must be on the same device as `Spectrogram`, " *
         "instead `$(get_backend(waveform))` vs `$(get_backend(sp.window))`."))
-    return spectrogram(waveform;
+    spectrogram(waveform;
         sp.n_fft, sp.hop_length, sp.pad, sp.power, sp.center,
         sp.window, sp.normalized, sp.window_normalized)
 end
@@ -76,11 +76,15 @@ function (ms::MelScale)(spec)
         "`spec` must be on the same device as `MelScale`, " *
         "instead `$(get_backend(spec))` vs `$(get_backend(ms.filterbanks))`."))
 
+    sz = size(spec)
+    spec = reshape(spec, (sz[1:2]..., :))
+
     n_freqs, time, batch = size(spec)
     n_freqs_fb, n_mels = size(ms.filterbanks)
     n_freqs != n_freqs_fb && throw(ArgumentError(
         "`n_freqs=$n_freqs` for `spec` does not match " *
         "`n_freqs=$n_freqs_fb` for filter banks."))
 
-    return permutedims(spec, (2, 1, 3)) ⊠ ms.filterbanks
+    mel = permutedims(spec, (2, 1, 3)) ⊠ ms.filterbanks
+    reshape(mel, (size(mel)[1:2]..., sz[3:end]...))
 end
