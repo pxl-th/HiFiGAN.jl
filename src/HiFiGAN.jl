@@ -119,13 +119,18 @@ function main()
                 generator, period_discriminator, scale_discriminator;
                 opt_generator, opt_period_discriminator, opt_scale_discriminator,
                 mel_transform)
-            GC.gc(true)
             GC.gc(false)
+            GC.gc(true)
 
             if steps % test_step == 0
                 vloss = validation_step(generator, test_loader;
                     mel_transform, val_dir, vis_dir, current_step=steps)
                 push!(vlosses, vloss)
+
+                if length(vlosses) > 1
+                    fig = lines(vlosses)
+                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
+                end
             end
 
             if steps % save_step == 0
@@ -137,13 +142,7 @@ function main()
                     opt_generator=cpu(opt_generator),
                     opt_period_discriminator=cpu(opt_period_discriminator),
                     opt_scale_discriminator=cpu(opt_scale_discriminator),
-                    last_epoch,
-                    vlosses,
-                )
-                if length(vlosses) > 1
-                    fig = lines(vlosses)
-                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
-                end
+                    last_epoch, vlosses)
             end
 
             next!(bar; showvalues=[(:GLoss, gloss), (:DLoss, dloss), (:VLoss, vloss)])
