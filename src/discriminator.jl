@@ -27,7 +27,7 @@ function (pd::PeriodDiscriminator)(x)
         time += n_pad
     end
 
-    x_tiled = reshape(x, (pd.period, time ÷ pd.period, channels, batch))
+    x_tiled = reshape(x, (time ÷ pd.period, pd.period, channels, batch))
     Flux.activations(pd.convs, x_tiled)
 end
 
@@ -90,3 +90,23 @@ MultiScaleDiscriminator() = MultiScaleDiscriminator(
 ))
 
 (msd::MultiScaleDiscriminator)(y) = msd.discriminators(y)
+
+function test_scale_discriminator()
+    msd = MultiScaleDiscriminator() |> gpu
+    x = rand(Float32, 8192, 1, 1) |> gpu
+    y = msd(x)
+    @show size(y)
+    return
+end
+
+function test_fail_conv()
+    c = Conv((41,), 128 => 128; stride=2, pad=20, groups=4)
+    cd = c |> gpu
+    x = rand(Float32, 8192, 128, 1)
+    xd = x|> gpu
+    y = c(x)
+    yd = cd(xd)
+    @show size(y), size(yd)
+    @show Array(yd) ≈ y
+    return
+end

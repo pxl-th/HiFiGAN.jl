@@ -39,7 +39,7 @@ function main()
     train_dataset = LJDataset(train_files)
     test_dataset = LJDataset(test_files)
 
-    train_loader = MLUtils.DataLoader(train_dataset; batchsize=8, shuffle=true)
+    train_loader = MLUtils.DataLoader(train_dataset; batchsize=16, shuffle=true)
     test_loader = MLUtils.DataLoader(test_dataset; batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
@@ -119,6 +119,8 @@ function main()
                 generator, period_discriminator, scale_discriminator;
                 opt_generator, opt_period_discriminator, opt_scale_discriminator,
                 mel_transform)
+            GC.gc(true)
+            GC.gc(false)
 
             if steps % test_step == 0
                 vloss = validation_step(generator, test_loader;
@@ -237,6 +239,52 @@ function validation_step(
         end
     end
     return total_loss
+end
+
+function tt()
+    GC.enable_logging(true)
+
+    generator = Generator(;
+        upsample_kernels=[16, 16, 8],
+        upsample_rates=[8, 8, 4],
+        upsample_initial_channels=256,
+
+        resblock_kernels=[3, 5, 7],
+        resblock_dilations=[[1, 2], [2, 6], [3, 12]],
+    ) |> gpu
+    msd = MultiScaleDiscriminator() |> gpu
+    mpd = MultiPeriodDiscriminator() |> gpu
+
+    mel = gpu(rand(Float32, 32, 80, 32))
+
+    # pd = PeriodDiscriminator(2) |> gpu
+    # y = gpu(rand(Float32, 8192, 1, 32))
+
+    t1 = time()
+    for i in 1:1
+        # Flux.gradient(generator) do generator
+        #     sum(generator(mel))
+        # end
+        ti1 = time()
+        y = generator(mel)
+        msd(y)
+        mpd(y)
+        AMDGPU.device_synchronize()
+        ti2 = time()
+        println("$i: $(ti2 - ti1) sec")
+    end
+    t2 = time()
+    @info "Time: $(t2 - t1) sec"
+    return
+end
+
+function mm()
+    c = ConvTranspose((16,), 128 => 64; stride=8, pad=4) |> gpu
+    x = gpu(rand(Float32, 256, 128, 32))
+    for i in 1:1
+        c(x)
+        AMDGPU.device_synchronize()
+    end
 end
 
 end
