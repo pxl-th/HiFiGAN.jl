@@ -119,8 +119,6 @@ function main()
                 generator, period_discriminator, scale_discriminator;
                 opt_generator, opt_period_discriminator, opt_scale_discriminator,
                 mel_transform)
-            GC.gc(false)
-            GC.gc(true)
 
             if steps % test_step == 0
                 vloss = validation_step(generator, test_loader;
@@ -251,8 +249,8 @@ function tt()
         resblock_kernels=[3, 5, 7],
         resblock_dilations=[[1, 2], [2, 6], [3, 12]],
     ) |> gpu
-    msd = MultiScaleDiscriminator() |> gpu
-    mpd = MultiPeriodDiscriminator() |> gpu
+    # msd = MultiScaleDiscriminator() |> gpu
+    # mpd = MultiPeriodDiscriminator() |> gpu
 
     mel = gpu(rand(Float32, 32, 80, 32))
 
@@ -260,30 +258,23 @@ function tt()
     # y = gpu(rand(Float32, 8192, 1, 32))
 
     t1 = time()
-    for i in 1:1
+    for i in 1:50
+        ti1 = time()
+        sum(mel)
+        # y = generator(mel)
         # Flux.gradient(generator) do generator
         #     sum(generator(mel))
         # end
-        ti1 = time()
-        y = generator(mel)
-        msd(y)
-        mpd(y)
-        AMDGPU.device_synchronize()
+        # msd(y)
+        # mpd(y)
+        # AMDGPU.device_synchronize()
         ti2 = time()
         println("$i: $(ti2 - ti1) sec")
     end
+    AMDGPU.device_synchronize()
     t2 = time()
     @info "Time: $(t2 - t1) sec"
     return
-end
-
-function mm()
-    c = ConvTranspose((16,), 128 => 64; stride=8, pad=4) |> gpu
-    x = gpu(rand(Float32, 256, 128, 32))
-    for i in 1:1
-        c(x)
-        AMDGPU.device_synchronize()
-    end
 end
 
 end
