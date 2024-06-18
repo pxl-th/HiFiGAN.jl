@@ -12,6 +12,7 @@ using FLAC
 using Random
 using Statistics
 using ProgressMeter
+using Zygote
 
 import JLD2
 import MLUtils
@@ -159,33 +160,37 @@ function train_step(
     wavs, mel, mel_loss = gpu.(batch)
     wavs_gen = nothing
 
+    Δ = gpu(ones(Float32, 1))
+
     # Generator step.
-    gloss, ∇ = Flux.withgradient(generator) do generator
+    gloss, gback = Zygote.pullback(generator) do generator
         ŷ = generator(mel)
         wavs_gen = copy(ŷ) # Store for the discriminator step.
 
         # Reshape from (n_frames, channels, batch) to (n_frames, batch).
         ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-        loss_mel = Flux.mae(ŷ_mel, mel_loss)
+        loss_mel = _mae(ŷ_mel, mel_loss)
 
         period_maps = period_discriminator(wavs)
         period_gen_maps = period_discriminator(ŷ)
         loss_period =
-            generator_loss(period_gen_maps) +
+            generator_loss(period_gen_maps) .+
             feature_loss(period_maps, period_gen_maps)
 
         scale_maps = scale_discriminator(wavs)
         scale_gen_maps = scale_discriminator(ŷ)
         loss_scale =
-            generator_loss(scale_gen_maps) +
+            generator_loss(scale_gen_maps) .+
             feature_loss(scale_maps, scale_gen_maps)
 
-        45f0 * loss_mel + loss_period + loss_scale
+        # TODO move 45f0 to gpu?
+        45f0 .* loss_mel .+ loss_period .+ loss_scale
     end
-    update && Flux.update!(opt_generator, generator, ∇[1])
+    ∇G = gback(Δ)
+    update && Flux.update!(opt_generator, generator, ∇G[1])
 
     # Discriminators step.
-    dloss, ∇ = Flux.withgradient(
+    dloss, dback = Zygote.pullback(
         period_discriminator, scale_discriminator,
     ) do period_discriminator, scale_discriminator
         period_maps = period_discriminator(wavs)
@@ -196,28 +201,30 @@ function train_step(
         scale_gen_maps = scale_discriminator(wavs_gen)
         scale_loss = discriminator_loss(scale_maps, scale_gen_maps)
 
-        period_loss + scale_loss
+        period_loss .+ scale_loss
     end
+    ∇D = dback(Δ)
+
     if update
-        Flux.update!(opt_period_discriminator, period_discriminator, ∇[1])
-        Flux.update!(opt_scale_discriminator, scale_discriminator, ∇[2])
+        Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
+        Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
     end
 
-    return gloss, dloss
+    return Array(gloss)[1], Array(dloss)[1]
 end
 
 function validation_step(
     generator, test_loader;
     mel_transform, val_dir, vis_dir, current_step::Int,
 )
-    total_loss = 0f0
+    total_loss = gpu([0f0])
     @showprogress desc="Validating" for (i, batch) in enumerate(test_loader)
         wavs, mel, mel_loss = gpu.(batch)
 
         ŷ = generator(mel)
         # Reshape from (n_frames, channels, batch) to (n_frames, batch).
         ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-        total_loss += Flux.mae(ŷ_mel, mel_loss)
+        total_loss .+= _mae(ŷ_mel, mel_loss)
 
         if i ≤ 4
             if current_step == 0
@@ -235,45 +242,30 @@ function validation_step(
             save(joinpath(vis_dir, "mel-gen-$current_step-$i.png"), fig)
         end
     end
-    return total_loss
+    return Array(total_loss)[1]
 end
 
 function tt()
-    GC.enable_logging(true)
-
-    generator = Generator(;
-        upsample_kernels=[16, 16, 8],
-        upsample_rates=[8, 8, 4],
-        upsample_initial_channels=256,
-
-        resblock_kernels=[3, 5, 7],
-        resblock_dilations=[[1, 2], [2, 6], [3, 12]],
-    ) |> gpu
+    mpd = MultiPeriodDiscriminator() |> gpu
     # msd = MultiScaleDiscriminator() |> gpu
-    # mpd = MultiPeriodDiscriminator() |> gpu
 
-    mel = gpu(rand(Float32, 32, 80, 32))
+    wav = gpu(rand(Float32, 8192, 1, 1))
+    Δ = gpu(ones(Float32, 1, 1, 1))
 
-    # pd = PeriodDiscriminator(2) |> gpu
-    # y = gpu(rand(Float32, 8192, 1, 32))
+    mmaps = mpd(wav)
+    @show typeof(mmaps)
+    @show length(mmaps)
 
-    t1 = time()
-    for i in 1:50
-        ti1 = time()
-        sum(mel)
-        # y = generator(mel)
-        # Flux.gradient(generator) do generator
-        #     sum(generator(mel))
-        # end
-        # msd(y)
-        # mpd(y)
-        # AMDGPU.device_synchronize()
-        ti2 = time()
-        println("$i: $(ti2 - ti1) sec")
+    l, back = Zygote.pullback(mpd) do mpd
+        dmaps = mpd(wav)
+        # gl = generator_loss(dmaps)
+        fl = feature_loss(dmaps, mmaps)
+        # dl = discriminator_loss(dmaps, dmaps)
+        # 5 * gl + fl + dl
     end
+    back(Δ)
+
     AMDGPU.device_synchronize()
-    t2 = time()
-    @info "Time: $(t2 - t1) sec"
     return
 end
 

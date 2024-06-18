@@ -6,7 +6,7 @@ Flux.@layer PeriodDiscriminator
 
 function PeriodDiscriminator(period::Int; kernel::Int = 5, stride::Int = 3)
     pad = (get_padding(kernel, 1), 0)
-    act = x -> leakyrelu(x, 0.1)
+    act = leakyrelu
     convs = Chain(
         Conv((kernel, 1), 1 => 32, act; stride=(stride, 1), pad),
         Conv((kernel, 1), 32 => 128, act; stride=(stride, 1), pad),
@@ -52,7 +52,7 @@ end
 Flux.@layer ScaleDiscriminator
 
 function ScaleDiscriminator()
-    act = x -> leakyrelu(x, 0.1)
+    act = leakyrelu
     convs = Chain(
         Conv((15,), 1 => 128, act; stride=1, pad=7),
         Conv((41,), 128 => 128, act; stride=2, pad=20, groups=4),

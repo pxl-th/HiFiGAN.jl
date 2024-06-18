@@ -1,5 +1,16 @@
 get_padding(kernel::Int, dilation::Int) = (kernel * dilation - dilation) ÷ 2
 
+# Scaler is a replacement for activation function x -> x .* scale.
+# This helps prevent device to hots copies during backprop.
+struct Scaler{S}
+    value::S
+end
+Flux.@layer Scaler
+
+(s::Scaler)(x) = x .* s.value
+
+Flux.trainable(s::Scaler) = (;)
+
 struct ResBlock2{C}
     convs::C
 end
@@ -11,7 +22,7 @@ function ResBlock2(; channels::Int, kernel::Int, dilation::Vector{Int},
         # x + conv(lrelu(x))
         SkipConnection(
             Chain(
-                x -> leakyrelu(x, 0.1),
+                leakyrelu,
                 Conv((kernel,), channels => channels;
                     dilation=dilation[1], pad=get_padding(kernel, dilation[1])),
             ), +,
@@ -19,7 +30,7 @@ function ResBlock2(; channels::Int, kernel::Int, dilation::Vector{Int},
         # x + conv(lrelu(x))
         SkipConnection(
             Chain(
-                x -> leakyrelu(x, 0.1),
+                leakyrelu,
                 Conv((kernel,), channels => channels;
                     dilation=dilation[2], pad=get_padding(kernel, dilation[2])),
             ), +,
@@ -70,16 +81,16 @@ function Generator(;
         end
 
         push!(ups, Chain(
-            x -> leakyrelu(x, 0.1),
+            leakyrelu,
             ConvTranspose((kernel,), cin => cout;
                 stride=rate, pad=(kernel - rate) ÷ 2),
-            Chain(rbchain..., x -> x .* scale),
+            Chain(rbchain..., Scaler([scale])),
         ))
     end
 
     conv_pre = Conv((7,), 80 => upsample_initial_channels; pad=3)
-    conv_post = Chain(Conv((7,), channels => 1; pad=3), x -> leakyrelu(x, 0.1))
+    conv_post = Chain(leakyrelu, Conv((7,), channels => 1, tanh; pad=3))
     Generator(Chain(ups...), conv_pre, conv_post)
 end
 
-(g::Generator)(x) = x |> g.conv_pre |> g.ups |> g.conv_post .|> tanh
+(g::Generator)(x) = x |> g.conv_pre |> g.ups |> g.conv_post
