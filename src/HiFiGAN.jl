@@ -247,25 +247,34 @@ end
 
 function tt()
     mpd = MultiPeriodDiscriminator() |> gpu
-    # msd = MultiScaleDiscriminator() |> gpu
 
     wav = gpu(rand(Float32, 8192, 1, 1))
     Δ = gpu(ones(Float32, 1, 1, 1))
 
     mmaps = mpd(wav)
-    @show typeof(mmaps)
-    @show length(mmaps)
 
     l, back = Zygote.pullback(mpd) do mpd
         dmaps = mpd(wav)
-        # gl = generator_loss(dmaps)
-        fl = feature_loss(dmaps, mmaps)
-        # dl = discriminator_loss(dmaps, dmaps)
-        # 5 * gl + fl + dl
+        gl = generator_loss(dmaps)
+        fl = feature_loss(mmaps, dmaps)
+        gl + fl
     end
     back(Δ)
 
     AMDGPU.device_synchronize()
+    return
+end
+
+# TODO fix
+function mm()
+    x = gpu(rand(Float32, 4))
+    Δ = gpu(ones(Float32, 1))
+
+    ids = ROCArray([4, 3, 2, 1])
+    l, back = Zygote.pullback(x) do x
+        sum(x[ids]; dims=1)
+    end
+    back(Δ)
     return
 end
 

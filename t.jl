@@ -1,2 +1,2 @@
 using HiFiGAN
-HiFiGAN.tt()
+HiFiGAN.main()
