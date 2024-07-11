@@ -62,24 +62,24 @@ function main()
 
     vlosses = Float32[]
 
-    # Try loading latest checkpoint.
-    states = readdir(states_dir)
-    if !isempty(states)
-        states = sort(states; by=i -> parse(Int, split(i, "-")[2]))
-        ckpt_path = joinpath(states_dir, states[end])
-        @info "Loading checkpoint: `$ckpt_path`."
-        ckpt = JLD2.load(ckpt_path)
+    # # Try loading latest checkpoint.
+    # states = readdir(states_dir)
+    # if !isempty(states)
+    #     states = sort(states; by=i -> parse(Int, split(i, "-")[2]))
+    #     ckpt_path = joinpath(states_dir, states[end])
+    #     @info "Loading checkpoint: `$ckpt_path`."
+    #     ckpt = JLD2.load(ckpt_path)
 
-        opt_generator = ckpt["opt_generator"]
-        opt_period_discriminator = ckpt["opt_period_discriminator"]
-        opt_scale_discriminator = ckpt["opt_scale_discriminator"]
+    #     opt_generator = ckpt["opt_generator"]
+    #     opt_period_discriminator = ckpt["opt_period_discriminator"]
+    #     opt_scale_discriminator = ckpt["opt_scale_discriminator"]
 
-        Flux.loadmodel!(generator, ckpt["generator"])
-        Flux.loadmodel!(period_discriminator, ckpt["period_discriminator"])
-        Flux.loadmodel!(scale_discriminator, ckpt["scale_discriminator"])
+    #     Flux.loadmodel!(generator, ckpt["generator"])
+    #     Flux.loadmodel!(period_discriminator, ckpt["period_discriminator"])
+    #     Flux.loadmodel!(scale_discriminator, ckpt["scale_discriminator"])
 
-        vlosses = ckpt["vlosses"]
-    end
+    #     vlosses = ckpt["vlosses"]
+    # end
 
     generator = generator |> gpu
     period_discriminator = period_discriminator |> gpu
@@ -121,34 +121,37 @@ function main()
                 opt_generator, opt_period_discriminator, opt_scale_discriminator,
                 mel_transform)
 
-            if steps % test_step == 0
-                vloss = validation_step(generator, test_loader;
-                    mel_transform, val_dir, vis_dir, current_step=steps)
-                push!(vlosses, vloss)
+            # if steps % test_step == 0
+            #     vloss = validation_step(generator, test_loader;
+            #         mel_transform, val_dir, vis_dir, current_step=steps)
+            #     push!(vlosses, vloss)
 
-                if length(vlosses) > 1
-                    fig = lines(vlosses)
-                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
-                end
-            end
+            #     if length(vlosses) > 1
+            #         fig = lines(vlosses)
+            #         save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
+            #     end
+            # end
 
-            if steps % save_step == 0
-                JLD2.jldsave(joinpath(states_dir, "ckpt-$epoch-$steps.jld2");
-                    generator=Flux.state(generator |> cpu),
-                    period_discriminator=Flux.state(period_discriminator |> cpu),
-                    scale_discriminator=Flux.state(scale_discriminator |> cpu),
+            # if steps % save_step == 0
+            #     JLD2.jldsave(joinpath(states_dir, "ckpt-$epoch-$steps.jld2");
+            #         generator=Flux.state(generator |> cpu),
+            #         period_discriminator=Flux.state(period_discriminator |> cpu),
+            #         scale_discriminator=Flux.state(scale_discriminator |> cpu),
 
-                    opt_generator=cpu(opt_generator),
-                    opt_period_discriminator=cpu(opt_period_discriminator),
-                    opt_scale_discriminator=cpu(opt_scale_discriminator),
-                    last_epoch, vlosses)
-            end
+            #         opt_generator=cpu(opt_generator),
+            #         opt_period_discriminator=cpu(opt_period_discriminator),
+            #         opt_scale_discriminator=cpu(opt_scale_discriminator),
+            #         last_epoch, vlosses)
+            # end
 
             next!(bar; showvalues=[(:GLoss, gloss), (:DLoss, dloss), (:VLoss, vloss)])
             steps += 1
+            steps == 10 && break
         end
         last_epoch = epoch
+        break
     end
+    AMDGPU.device_synchronize()
     return
 end
 
@@ -160,7 +163,7 @@ function train_step(
     wavs, mel, mel_loss = gpu.(batch)
     wavs_gen = nothing
 
-    Δ = gpu(ones(Float32, 1))
+    Δ = gpu([1f0])
 
     # Generator step.
     gloss, gback = Zygote.pullback(generator) do generator
@@ -175,15 +178,14 @@ function train_step(
         period_gen_maps = period_discriminator(ŷ)
         loss_period =
             generator_loss(period_gen_maps) .+
-            feature_loss(period_maps, period_gen_maps)
+            2f0 .* feature_loss(period_maps, period_gen_maps)
 
         scale_maps = scale_discriminator(wavs)
         scale_gen_maps = scale_discriminator(ŷ)
         loss_scale =
             generator_loss(scale_gen_maps) .+
-            feature_loss(scale_maps, scale_gen_maps)
+            2f0 .* feature_loss(scale_maps, scale_gen_maps)
 
-        # TODO move 45f0 to gpu?
         45f0 .* loss_mel .+ loss_period .+ loss_scale
     end
     ∇G = gback(Δ)
@@ -210,7 +212,8 @@ function train_step(
         Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
     end
 
-    return Array(gloss)[1], Array(dloss)[1]
+    return gloss, dloss
+    # return Array(gloss)[1], Array(dloss)[1]
 end
 
 function validation_step(
@@ -265,16 +268,15 @@ function tt()
     return
 end
 
-# TODO fix
 function mm()
-    x = gpu(rand(Float32, 4))
-    Δ = gpu(ones(Float32, 1))
-
-    ids = ROCArray([4, 3, 2, 1])
-    l, back = Zygote.pullback(x) do x
-        sum(x[ids]; dims=1)
+    x = rand(Float32, 8192, 1, 16) |> gpu
+    # mpd = PeriodDiscriminator(2) |> gpu
+    mpd = MultiPeriodDiscriminator() |> gpu
+    for i in 1:10
+        y = mpd(x)
+        @show size(y)
     end
-    back(Δ)
+    AMDGPU.device_synchronize()
     return
 end
 
