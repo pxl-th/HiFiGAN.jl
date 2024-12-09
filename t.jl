@@ -1,2 +1,0 @@
-using HiFiGAN
-HiFiGAN.main()

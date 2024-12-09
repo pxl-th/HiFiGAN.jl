@@ -1,7 +1,6 @@
 module HiFiGAN
 
 using AMDGPU
-# using CUDA
 using KernelAbstractions
 using NNlib
 using Makie
@@ -24,6 +23,11 @@ include("discriminator.jl")
 include("loss.jl")
 
 function main()
+    AMDGPU.invalidate_caching_allocator!(:trainstep)
+    GC.gc(false)
+    GC.gc(true)
+    AMDGPU.HIP.reclaim()
+
     CairoMakie.activate!()
 
     output_dir = joinpath(homedir(), "code", "HiFiGAN.jl", "runs")
@@ -40,7 +44,8 @@ function main()
     train_dataset = LJDataset(train_files)
     test_dataset = LJDataset(test_files)
 
-    train_loader = MLUtils.DataLoader(train_dataset; batchsize=16, shuffle=true)
+    train_loader = MLUtils.DataLoader(train_dataset;
+        batchsize=16, shuffle=true, partial=false)
     test_loader = MLUtils.DataLoader(test_dataset; batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
@@ -93,7 +98,7 @@ function main()
     last_epoch = 0
     epochs = 3000
     save_step = 1000
-    test_step = 100
+    test_step = 1000
 
     mel_transform = gpu(train_dataset.mel_transform_loss)
     gloss, dloss, vloss = 0f0, 0f0, 0f0
@@ -108,6 +113,7 @@ function main()
             mel_transform, update=false)
         break
     end
+    AMDGPU.invalidate_caching_allocator!(:trainstep)
     GC.gc(false)
     GC.gc(true)
     AMDGPU.HIP.reclaim()
@@ -121,37 +127,36 @@ function main()
                 opt_generator, opt_period_discriminator, opt_scale_discriminator,
                 mel_transform)
 
-            # if steps % test_step == 0
-            #     vloss = validation_step(generator, test_loader;
-            #         mel_transform, val_dir, vis_dir, current_step=steps)
-            #     push!(vlosses, vloss)
+            if steps % test_step == 0
+                AMDGPU.invalidate_caching_allocator!(:trainstep)
 
-            #     if length(vlosses) > 1
-            #         fig = lines(vlosses)
-            #         save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
-            #     end
-            # end
+                vloss = validation_step(generator, test_loader;
+                    mel_transform, val_dir, vis_dir, current_step=steps)
+                push!(vlosses, vloss)
 
-            # if steps % save_step == 0
-            #     JLD2.jldsave(joinpath(states_dir, "ckpt-$epoch-$steps.jld2");
-            #         generator=Flux.state(generator |> cpu),
-            #         period_discriminator=Flux.state(period_discriminator |> cpu),
-            #         scale_discriminator=Flux.state(scale_discriminator |> cpu),
+                if length(vlosses) > 1
+                    fig = lines(vlosses)
+                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
+                end
+            end
 
-            #         opt_generator=cpu(opt_generator),
-            #         opt_period_discriminator=cpu(opt_period_discriminator),
-            #         opt_scale_discriminator=cpu(opt_scale_discriminator),
-            #         last_epoch, vlosses)
-            # end
+            if steps % save_step == 0
+                JLD2.jldsave(joinpath(states_dir, "ckpt-$epoch-$steps.jld2");
+                    generator=Flux.state(generator |> cpu),
+                    period_discriminator=Flux.state(period_discriminator |> cpu),
+                    scale_discriminator=Flux.state(scale_discriminator |> cpu),
+
+                    opt_generator=cpu(opt_generator),
+                    opt_period_discriminator=cpu(opt_period_discriminator),
+                    opt_scale_discriminator=cpu(opt_scale_discriminator),
+                    last_epoch, vlosses)
+            end
 
             next!(bar; showvalues=[(:GLoss, gloss), (:DLoss, dloss), (:VLoss, vloss)])
             steps += 1
-            steps == 10 && break
         end
         last_epoch = epoch
-        break
     end
-    AMDGPU.device_synchronize()
     return
 end
 
@@ -160,124 +165,95 @@ function train_step(
     opt_generator, opt_period_discriminator, opt_scale_discriminator,
     mel_transform, update::Bool = true,
 )
-    wavs, mel, mel_loss = gpu.(batch)
-    wavs_gen = nothing
+    gloss, dloss = AMDGPU.with_caching_allocator(:trainstep) do
+        wavs, mel, mel_loss = gpu.(batch)
+        wavs_gen = nothing
 
-    Δ = gpu([1f0])
+        Δ = gpu([1f0])
 
-    # Generator step.
-    gloss, gback = Zygote.pullback(generator) do generator
-        ŷ = generator(mel)
-        wavs_gen = copy(ŷ) # Store for the discriminator step.
+        # Generator step.
+        gloss, gback = Zygote.pullback(generator) do generator
+            ŷ = generator(mel)
+            wavs_gen = copy(ŷ) # Store for the discriminator step.
 
-        # Reshape from (n_frames, channels, batch) to (n_frames, batch).
-        ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-        loss_mel = _mae(ŷ_mel, mel_loss)
+            # Reshape from (n_frames, channels, batch) to (n_frames, batch).
+            ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
+            loss_mel = _mae(ŷ_mel, mel_loss)
 
-        period_maps = period_discriminator(wavs)
-        period_gen_maps = period_discriminator(ŷ)
-        loss_period =
-            generator_loss(period_gen_maps) .+
-            2f0 .* feature_loss(period_maps, period_gen_maps)
+            period_maps = period_discriminator(wavs)
+            period_gen_maps = period_discriminator(ŷ)
+            loss_period =
+                generator_loss(period_gen_maps) .+
+                2f0 .* feature_loss(period_maps, period_gen_maps)
 
-        scale_maps = scale_discriminator(wavs)
-        scale_gen_maps = scale_discriminator(ŷ)
-        loss_scale =
-            generator_loss(scale_gen_maps) .+
-            2f0 .* feature_loss(scale_maps, scale_gen_maps)
+            scale_maps = scale_discriminator(wavs)
+            scale_gen_maps = scale_discriminator(ŷ)
+            loss_scale =
+                generator_loss(scale_gen_maps) .+
+                2f0 .* feature_loss(scale_maps, scale_gen_maps)
 
-        45f0 .* loss_mel .+ loss_period .+ loss_scale
+            45f0 .* loss_mel .+ loss_period .+ loss_scale
+        end
+        ∇G = gback(Δ)
+        update && Flux.update!(opt_generator, generator, ∇G[1])
+
+        # Discriminators step.
+        dloss, dback = Zygote.pullback(
+            period_discriminator, scale_discriminator,
+        ) do period_discriminator, scale_discriminator
+            period_maps = period_discriminator(wavs)
+            period_gen_maps = period_discriminator(wavs_gen)
+            period_loss = discriminator_loss(period_maps, period_gen_maps)
+
+            scale_maps = scale_discriminator(wavs)
+            scale_gen_maps = scale_discriminator(wavs_gen)
+            scale_loss = discriminator_loss(scale_maps, scale_gen_maps)
+
+            period_loss .+ scale_loss
+        end
+        ∇D = dback(Δ)
+
+        if update
+            Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
+            Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
+        end
+        return Array(gloss)[1], Array(dloss)[1]
     end
-    ∇G = gback(Δ)
-    update && Flux.update!(opt_generator, generator, ∇G[1])
-
-    # Discriminators step.
-    dloss, dback = Zygote.pullback(
-        period_discriminator, scale_discriminator,
-    ) do period_discriminator, scale_discriminator
-        period_maps = period_discriminator(wavs)
-        period_gen_maps = period_discriminator(wavs_gen)
-        period_loss = discriminator_loss(period_maps, period_gen_maps)
-
-        scale_maps = scale_discriminator(wavs)
-        scale_gen_maps = scale_discriminator(wavs_gen)
-        scale_loss = discriminator_loss(scale_maps, scale_gen_maps)
-
-        period_loss .+ scale_loss
-    end
-    ∇D = dback(Δ)
-
-    if update
-        Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
-        Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
-    end
-
     return gloss, dloss
-    # return Array(gloss)[1], Array(dloss)[1]
 end
 
 function validation_step(
-    generator, test_loader;
-    mel_transform, val_dir, vis_dir, current_step::Int,
+    generator, test_loader; mel_transform, val_dir, vis_dir, current_step::Int,
 )
     total_loss = gpu([0f0])
     @showprogress desc="Validating" for (i, batch) in enumerate(test_loader)
-        wavs, mel, mel_loss = gpu.(batch)
+        AMDGPU.with_caching_allocator(:valstep) do
+            wavs, mel, mel_loss = gpu.(batch)
 
-        ŷ = generator(mel)
-        # Reshape from (n_frames, channels, batch) to (n_frames, batch).
-        ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-        total_loss .+= _mae(ŷ_mel, mel_loss)
+            ŷ = generator(mel)
+            # Reshape from (n_frames, channels, batch) to (n_frames, batch).
+            ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
+            total_loss .+= _mae(ŷ_mel, mel_loss)
 
-        if i ≤ 4
-            if current_step == 0
-                save(joinpath(val_dir, "real-$current_step-$i.flac"),
-                    reshape(cpu(wavs), size(wavs, 1), 1), 16000)
+            if i ≤ 4
+                if current_step == 0
+                    save(joinpath(val_dir, "real-$current_step-$i.flac"),
+                        reshape(cpu(wavs), size(wavs, 1), 1), 16000)
 
-                fig = heatmap(NNlib.power_to_db(cpu(mel_loss))[:, :, 1])
-                save(joinpath(vis_dir, "mel-real-$current_step-$i.png"), fig)
+                    fig = heatmap(NNlib.power_to_db(cpu(mel_loss))[:, :, 1])
+                    save(joinpath(vis_dir, "mel-real-$current_step-$i.png"), fig)
+                end
+
+                save(joinpath(val_dir, "gen-$current_step-$i.flac"),
+                    reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
+
+                fig = heatmap(NNlib.power_to_db(cpu(ŷ_mel))[:, :, 1])
+                save(joinpath(vis_dir, "mel-gen-$current_step-$i.png"), fig)
             end
-
-            save(joinpath(val_dir, "gen-$current_step-$i.flac"),
-                reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
-
-            fig = heatmap(NNlib.power_to_db(cpu(ŷ_mel))[:, :, 1])
-            save(joinpath(vis_dir, "mel-gen-$current_step-$i.png"), fig)
         end
     end
+    AMDGPU.invalidate_caching_allocator!(:valstep)
     return Array(total_loss)[1]
-end
-
-function tt()
-    mpd = MultiPeriodDiscriminator() |> gpu
-
-    wav = gpu(rand(Float32, 8192, 1, 1))
-    Δ = gpu(ones(Float32, 1, 1, 1))
-
-    mmaps = mpd(wav)
-
-    l, back = Zygote.pullback(mpd) do mpd
-        dmaps = mpd(wav)
-        gl = generator_loss(dmaps)
-        fl = feature_loss(mmaps, dmaps)
-        gl + fl
-    end
-    back(Δ)
-
-    AMDGPU.device_synchronize()
-    return
-end
-
-function mm()
-    x = rand(Float32, 8192, 1, 16) |> gpu
-    # mpd = PeriodDiscriminator(2) |> gpu
-    mpd = MultiPeriodDiscriminator() |> gpu
-    for i in 1:10
-        y = mpd(x)
-        @show size(y)
-    end
-    AMDGPU.device_synchronize()
-    return
 end
 
 end
