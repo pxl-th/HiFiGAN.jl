@@ -61,9 +61,9 @@ function main()
     period_discriminator = MultiPeriodDiscriminator()
     scale_discriminator = MultiScaleDiscriminator()
 
-    opt_generator = Flux.setup(AdamW(2e-4), generator)
-    opt_period_discriminator = Flux.setup(AdamW(2e-4), period_discriminator)
-    opt_scale_discriminator = Flux.setup(AdamW(2e-4), scale_discriminator)
+    opt_generator = Flux.setup(Adam(2e-4), generator)
+    opt_period_discriminator = Flux.setup(Adam(2e-4), period_discriminator)
+    opt_scale_discriminator = Flux.setup(Adam(2e-4), scale_discriminator)
 
     vlosses = Float32[]
 
