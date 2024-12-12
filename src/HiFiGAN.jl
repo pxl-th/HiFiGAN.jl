@@ -5,6 +5,7 @@ using KernelAbstractions
 using NNlib
 using Makie
 using CairoMakie
+using ChainRulesCore: ignore_derivatives
 using Flux
 using FileIO
 using FLAC
@@ -24,6 +25,7 @@ include("loss.jl")
 
 function main()
     AMDGPU.invalidate_caching_allocator!(:trainstep)
+    AMDGPU.invalidate_caching_allocator!(:valstep)
     GC.gc(false)
     GC.gc(true)
     AMDGPU.HIP.reclaim()
@@ -40,13 +42,14 @@ function main()
     isdir(val_dir) || mkpath(val_dir)
     isdir(vis_dir) || mkpath(vis_dir)
 
-    train_files, test_files = load_files(joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv"))
+    files_list = joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv")
+    train_files, test_files = load_files(files_list; train_split=0.9)
     train_dataset = LJDataset(train_files)
     test_dataset = LJDataset(test_files)
 
     train_loader = MLUtils.DataLoader(train_dataset;
-        batchsize=16, shuffle=true, partial=false)
-    test_loader = MLUtils.DataLoader(test_dataset; batchsize=1)
+        batchsize=12, shuffle=true, partial=false)
+    test_loader = MLUtils.DataLoader(test_dataset; shuffle=false, batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
 
@@ -61,9 +64,9 @@ function main()
     period_discriminator = MultiPeriodDiscriminator()
     scale_discriminator = MultiScaleDiscriminator()
 
-    opt_generator = Flux.setup(Adam(2e-4), generator)
-    opt_period_discriminator = Flux.setup(Adam(2e-4), period_discriminator)
-    opt_scale_discriminator = Flux.setup(Adam(2e-4), scale_discriminator)
+    opt_generator = Flux.setup(AdamW(2e-4), generator)
+    opt_period_discriminator = Flux.setup(AdamW(2e-4), period_discriminator)
+    opt_scale_discriminator = Flux.setup(AdamW(2e-4), scale_discriminator)
 
     vlosses = Float32[]
 
@@ -165,16 +168,18 @@ function train_step(
     opt_generator, opt_period_discriminator, opt_scale_discriminator,
     mel_transform, update::Bool = true,
 )
-    gloss, dloss = AMDGPU.with_caching_allocator(:trainstep) do
-        wavs, mel, mel_loss = gpu.(batch)
-        wavs_gen = nothing
+    wavs, mel, mel_loss = gpu.(batch)
+    wavs_gen = nothing
+    Δ = gpu([1f0])
 
-        Δ = gpu([1f0])
-
+    gloss = AMDGPU.with_caching_allocator(:trainstep) do
         # Generator step.
         gloss, gback = Zygote.pullback(generator) do generator
             ŷ = generator(mel)
-            wavs_gen = copy(ŷ) # Store for the discriminator step.
+            # Store for the discriminator step.
+            wavs_gen = ignore_derivatives() do
+                AMDGPU.with_no_caching(() -> copy(ŷ))
+            end
 
             # Reshape from (n_frames, channels, batch) to (n_frames, batch).
             ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
@@ -197,6 +202,10 @@ function train_step(
         ∇G = gback(Δ)
         update && Flux.update!(opt_generator, generator, ∇G[1])
 
+        return Array(gloss)[1]
+    end
+
+    dloss = AMDGPU.with_caching_allocator(:trainstep) do
         # Discriminators step.
         dloss, dback = Zygote.pullback(
             period_discriminator, scale_discriminator,
@@ -217,8 +226,15 @@ function train_step(
             Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
             Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
         end
-        return Array(gloss)[1], Array(dloss)[1]
+        return Array(dloss)[1]
     end
+
+    AMDGPU.unsafe_free!(wavs)
+    AMDGPU.unsafe_free!(mel)
+    AMDGPU.unsafe_free!(mel_loss)
+    AMDGPU.unsafe_free!(wavs_gen)
+    AMDGPU.unsafe_free!(Δ)
+
     return gloss, dloss
 end
 
@@ -253,7 +269,7 @@ function validation_step(
         end
     end
     AMDGPU.invalidate_caching_allocator!(:valstep)
-    return Array(total_loss)[1]
+    return Array(total_loss)[1] / length(test_loader)
 end
 
 end

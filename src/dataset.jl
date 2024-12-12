@@ -73,7 +73,6 @@ function load_files(data_path::String; train_split::Real = 0.9)
         end
     end
 
-    # shuffle!(items)
     n_train = ceil(Int, length(items) * train_split)
     train_files, test_files = items[1:n_train], items[n_train + 1:end]
     return train_files, test_files

@@ -8,12 +8,12 @@ function PeriodDiscriminator(period::Int; kernel::Int = 5, stride::Int = 3)
     pad = (get_padding(kernel, 1), 0)
     act = leakyrelu
     convs = Chain(
-        Conv((kernel, 1), 1 => 32, act; stride=(stride, 1), pad),
-        Conv((kernel, 1), 32 => 128, act; stride=(stride, 1), pad),
-        Conv((kernel, 1), 128 => 512, act; stride=(stride, 1), pad),
-        Conv((kernel, 1), 512 => 1024, act; stride=(stride, 1), pad),
-        Conv((kernel, 1), 1024 => 1024, act; stride=1, pad=(2, 0)),
-        Conv((3, 1), 1024 => 1; pad=(1, 0)),
+        WeightNorm(Conv((kernel, 1), 1 => 32, act; stride=(stride, 1), pad)),
+        WeightNorm(Conv((kernel, 1), 32 => 128, act; stride=(stride, 1), pad)),
+        WeightNorm(Conv((kernel, 1), 128 => 512, act; stride=(stride, 1), pad)),
+        WeightNorm(Conv((kernel, 1), 512 => 1024, act; stride=(stride, 1), pad)),
+        WeightNorm(Conv((kernel, 1), 1024 => 1024, act; stride=1, pad=(2, 0))),
+        WeightNorm(Conv((3, 1), 1024 => 1; pad=(1, 0))),
     )
     PeriodDiscriminator(convs, period)
 end
@@ -54,14 +54,14 @@ Flux.@layer ScaleDiscriminator
 function ScaleDiscriminator()
     act = leakyrelu
     convs = Chain(
-        Conv((15,), 1 => 128, act; stride=1, pad=7),
-        Conv((41,), 128 => 128, act; stride=2, pad=20, groups=4),
-        Conv((41,), 128 => 256, act; stride=2, pad=20, groups=16),
-        Conv((41,), 256 => 512, act; stride=4, pad=20, groups=16),
-        Conv((41,), 512 => 1024, act; stride=4, pad=20, groups=16),
-        Conv((41,), 1024 => 1024, act; stride=1, pad=20, groups=16),
-        Conv((5,), 1024 => 1024, act; stride=1, pad=1),
-        Conv((3,), 1024 => 1; stride=1, pad=1),
+        WeightNorm(Conv((15,), 1 => 128, act; stride=1, pad=7)),
+        WeightNorm(Conv((41,), 128 => 128, act; stride=2, pad=20, groups=4)),
+        WeightNorm(Conv((41,), 128 => 256, act; stride=2, pad=20, groups=16)),
+        WeightNorm(Conv((41,), 256 => 512, act; stride=4, pad=20, groups=16)),
+        WeightNorm(Conv((41,), 512 => 1024, act; stride=4, pad=20, groups=16)),
+        WeightNorm(Conv((41,), 1024 => 1024, act; stride=1, pad=20, groups=16)),
+        WeightNorm(Conv((5,), 1024 => 1024, act; stride=1, pad=1)),
+        WeightNorm(Conv((3,), 1024 => 1; stride=1, pad=1)),
     )
     ScaleDiscriminator(convs)
 end
@@ -90,23 +90,3 @@ MultiScaleDiscriminator() = MultiScaleDiscriminator(
 ))
 
 (msd::MultiScaleDiscriminator)(y) = msd.discriminators(y)
-
-function test_scale_discriminator()
-    msd = MultiScaleDiscriminator() |> gpu
-    x = rand(Float32, 8192, 1, 1) |> gpu
-    y = msd(x)
-    @show size(y)
-    return
-end
-
-function test_fail_conv()
-    c = Conv((41,), 128 => 128; stride=2, pad=20, groups=4)
-    cd = c |> gpu
-    x = rand(Float32, 8192, 128, 1)
-    xd = x|> gpu
-    y = c(x)
-    yd = cd(xd)
-    @show size(y), size(yd)
-    @show Array(yd) ≈ y
-    return
-end

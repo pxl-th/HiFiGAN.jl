@@ -23,16 +23,16 @@ function ResBlock2(; channels::Int, kernel::Int, dilation::Vector{Int},
         SkipConnection(
             Chain(
                 leakyrelu,
-                Conv((kernel,), channels => channels;
-                    dilation=dilation[1], pad=get_padding(kernel, dilation[1])),
+                WeightNorm(Conv((kernel,), channels => channels;
+                    dilation=dilation[1], pad=get_padding(kernel, dilation[1]))),
             ), +,
         ),
         # x + conv(lrelu(x))
         SkipConnection(
             Chain(
                 leakyrelu,
-                Conv((kernel,), channels => channels;
-                    dilation=dilation[2], pad=get_padding(kernel, dilation[2])),
+                WeightNorm(Conv((kernel,), channels => channels;
+                    dilation=dilation[2], pad=get_padding(kernel, dilation[2]))),
             ), +,
         ),
     )
@@ -82,14 +82,14 @@ function Generator(;
 
         push!(ups, Chain(
             leakyrelu,
-            ConvTranspose((kernel,), cin => cout;
-                stride=rate, pad=(kernel - rate) ÷ 2),
+            WeightNorm(ConvTranspose((kernel,), cin => cout;
+                stride=rate, pad=(kernel - rate) ÷ 2)),
             Chain(rbchain..., Scaler([scale])),
         ))
     end
 
-    conv_pre = Conv((7,), 80 => upsample_initial_channels; pad=3)
-    conv_post = Chain(leakyrelu, Conv((7,), channels => 1, tanh; pad=3))
+    conv_pre = WeightNorm(Conv((7,), 80 => upsample_initial_channels; pad=3))
+    conv_post = Chain(leakyrelu, WeightNorm(Conv((7,), channels => 1, tanh; pad=3)))
     Generator(Chain(ups...), conv_pre, conv_post)
 end
 
