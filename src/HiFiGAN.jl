@@ -6,6 +6,7 @@ using NNlib
 using Makie
 using CairoMakie
 using ChainRulesCore: ignore_derivatives
+using GPUArrays
 using Flux
 using FileIO
 using FLAC
@@ -24,8 +25,10 @@ include("discriminator.jl")
 include("loss.jl")
 
 function main()
-    AMDGPU.invalidate_caching_allocator!(:trainstep)
-    AMDGPU.invalidate_caching_allocator!(:valstep)
+    kab = ROCBackend()
+    GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
+    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
+
     GC.gc(false)
     GC.gc(true)
     AMDGPU.HIP.reclaim()
@@ -116,7 +119,7 @@ function main()
             mel_transform, update=false)
         break
     end
-    AMDGPU.invalidate_caching_allocator!(:trainstep)
+    GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
     GC.gc(false)
     GC.gc(true)
     AMDGPU.HIP.reclaim()
@@ -131,7 +134,7 @@ function main()
                 mel_transform)
 
             if steps % test_step == 0
-                AMDGPU.invalidate_caching_allocator!(:trainstep)
+                GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
 
                 vloss = validation_step(generator, test_loader;
                     mel_transform, val_dir, vis_dir, current_step=steps)
@@ -172,13 +175,14 @@ function train_step(
     wavs_gen = nothing
     Δ = gpu([1f0])
 
-    gloss = AMDGPU.with_caching_allocator(:trainstep) do
+    kab = get_backend(wavs)
+    GPUArrays.@cache_scope kab :trainstep begin
         # Generator step.
         gloss, gback = Zygote.pullback(generator) do generator
             ŷ = generator(mel)
             # Store for the discriminator step.
             wavs_gen = ignore_derivatives() do
-                AMDGPU.with_no_caching(() -> copy(ŷ))
+                GPUArrays.@no_cache_scope copy(ŷ)
             end
 
             # Reshape from (n_frames, channels, batch) to (n_frames, batch).
@@ -201,11 +205,9 @@ function train_step(
         end
         ∇G = gback(Δ)
         update && Flux.update!(opt_generator, generator, ∇G[1])
-
-        return Array(gloss)[1]
     end
 
-    dloss = AMDGPU.with_caching_allocator(:trainstep) do
+    GPUArrays.@cache_scope kab :trainstep begin
         # Discriminators step.
         dloss, dback = Zygote.pullback(
             period_discriminator, scale_discriminator,
@@ -226,7 +228,6 @@ function train_step(
             Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
             Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
         end
-        return Array(dloss)[1]
     end
 
     AMDGPU.unsafe_free!(wavs)
@@ -235,15 +236,16 @@ function train_step(
     AMDGPU.unsafe_free!(wavs_gen)
     AMDGPU.unsafe_free!(Δ)
 
-    return gloss, dloss
+    return Array(gloss)[1], Array(dloss)[1]
 end
 
 function validation_step(
     generator, test_loader; mel_transform, val_dir, vis_dir, current_step::Int,
 )
     total_loss = gpu([0f0])
+    kab = get_backend(total_loss)
     @showprogress desc="Validating" for (i, batch) in enumerate(test_loader)
-        AMDGPU.with_caching_allocator(:valstep) do
+        GPUArrays.@cache_scope kab :valstep begin
             wavs, mel, mel_loss = gpu.(batch)
 
             ŷ = generator(mel)
@@ -268,7 +270,7 @@ function validation_step(
             end
         end
     end
-    AMDGPU.invalidate_caching_allocator!(:valstep)
+    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
     return Array(total_loss)[1] / length(test_loader)
 end
 
