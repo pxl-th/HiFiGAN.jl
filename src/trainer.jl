@@ -1,4 +1,4 @@
-Base.@kwdef mutable struct Trainer{M1, M2, M3, O1, O2, O3, L, T, D}
+Base.@kwdef mutable struct Trainer{M1, M2, M3, O1, O2, O3, S1, S2, L, T, D}
     generator::M1
     scale_discriminator::M2
     period_discriminator::M3
@@ -6,6 +6,9 @@ Base.@kwdef mutable struct Trainer{M1, M2, M3, O1, O2, O3, L, T, D}
     opt_generator::O1
     opt_scale_discriminator::O2
     opt_period_discriminator::O3
+
+    lr_gen_scheduler::S1
+    lr_disc_scheduler::S2
 
     train_loader::L
     test_loader::L
@@ -20,6 +23,7 @@ end
 function Trainer(device;
     generator, scale_discriminator, period_discriminator,
     opt_generator, opt_scale_discriminator, opt_period_discriminator,
+    lr_gen_scheduler, lr_disc_scheduler,
     train_loader, test_loader, mel_transform,
 )
     Trainer(
@@ -30,6 +34,9 @@ function Trainer(device;
         opt_generator |> device,
         opt_scale_discriminator |> device,
         opt_period_discriminator |> device,
+
+        lr_gen_scheduler,
+        lr_disc_scheduler,
 
         train_loader,
         test_loader,
@@ -47,7 +54,6 @@ function train!(trainer::Trainer;
     save_step::Int,
     test_step::Int,
     save_dir::String = ".",
-    precompile::Bool = false,
 )
     kab = get_backend(trainer.device(Array{Int}(undef, 0)))
 
@@ -67,11 +73,27 @@ function train!(trainer::Trainer;
     vlosses = Float32[]
     vloss = 0f0
 
+    # Recovert from provided checkpoint.
     if ckpt_path ≢ nothing
-        # TODO
-    end
-    if precompile
-        # TODO
+        ckpt = JLD2.load(ckpt_path)
+
+        Flux.loadmodel!(trainer.generator, ckpt["generator"])
+        Flux.loadmodel!(trainer.period_discriminator, ckpt["period_discriminator"])
+        Flux.loadmodel!(trainer.scale_discriminator, ckpt["scale_discriminator"])
+
+        Flux.loadmodel!(trainer.opt_generator, ckpt["opt_generator"])
+        Flux.loadmodel!(trainer.opt_scale_discriminator, ckpt["opt_scale_discriminator"])
+        Flux.loadmodel!(trainer.opt_period_discriminator, ckpt["opt_period_discriminator"])
+
+        trainer.lr_gen_scheduler.state = ckpt["lr_gen_scheduler"]
+        trainer.lr_disc_scheduler.state = ckpt["lr_disc_scheduler"]
+        # TODO update optimizers
+
+        trainer.current_step = get(ckpt, "current_step", 0)
+        trainer.current_epoch = get(ckpt, "current_epoch", 0)
+
+        vlosses = ckpt["vlosses"]
+        vloss = vlosses[end]
     end
 
     while trainer.current_epoch < epochs
@@ -94,7 +116,8 @@ function train!(trainer::Trainer;
             end
 
             if trainer.current_step % save_step == 0
-                JLD2.jldsave(joinpath(ckpt_dir, "ckpt-$(trainer.current_epoch)-$(trainer.current_step).jld2");
+                ckpt_file = joinpath(ckpt_dir, "ckpt-$(trainer.current_epoch)-$(trainer.current_step).jld2") 
+                JLD2.jldsave(ckpt_file;
                     generator=Flux.state(trainer.generator |> cpu),
                     period_discriminator=Flux.state(trainer.period_discriminator |> cpu),
                     scale_discriminator=Flux.state(trainer.scale_discriminator |> cpu),
@@ -103,8 +126,14 @@ function train!(trainer::Trainer;
                     opt_period_discriminator=cpu(trainer.opt_period_discriminator),
                     opt_scale_discriminator=cpu(trainer.opt_scale_discriminator),
 
-                    trainer.current_step, trainer.current_epoch,
-                    vlosses)
+                    lr_gen_scheduler=trainer.lr_gen_scheduler.state,
+                    lr_disc_scheduler=trainer.lr_disc_scheduler.state,
+
+                    trainer.current_step,
+                    trainer.current_epoch,
+
+                    vlosses,
+                )
             end
 
             next!(bar; showvalues=[
@@ -112,9 +141,18 @@ function train!(trainer::Trainer;
                 (:gen_loss, gloss),
                 (:disc_loss, dloss),
                 (:val_loss, vloss),
+                (:lr_gen, trainer.opt_generator.eta),
+                (:lr_disc, trainer.opt_scale_discriminator.eta),
             ])
             trainer.current_step += 1
+            break
         end
+
+        # trainer.opt_generator.eta = ParameterSchedulers.next!(trainer.lr_gen_scheduler)
+        # lr_disc = ParameterSchedulers.next!(trainer.lr_disc_scheduler)
+        # trainer.opt_scale_discriminator.eta = lr_disc
+        # trainer.opt_period_discriminator.eta = lr_disc
+
         trainer.current_epoch += 1
     end
     return

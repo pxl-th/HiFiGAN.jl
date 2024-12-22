@@ -8,6 +8,7 @@ using CairoMakie
 using ChainRulesCore: ignore_derivatives
 using GPUArrays
 using Flux
+using ParameterSchedulers
 using FileIO
 using FLAC
 using Random
@@ -49,7 +50,6 @@ function main()
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
 
-    # TODO load from config
     generator = Generator(;
         upsample_kernels=[16, 16, 8],
         upsample_rates=[8, 8, 4],
@@ -61,13 +61,17 @@ function main()
     period_discriminator = MultiPeriodDiscriminator()
     scale_discriminator = MultiScaleDiscriminator()
 
-    opt_generator = Flux.setup(AdamW(2e-4), generator)
-    opt_period_discriminator = Flux.setup(AdamW(2e-4), period_discriminator)
-    opt_scale_discriminator = Flux.setup(AdamW(2e-4), scale_discriminator)
+    opt_generator = Flux.setup(Flux.Optimisers.AdamW(2e-4), generator)
+    opt_period_discriminator = Flux.setup(Flux.Optimisers.AdamW(2e-4), period_discriminator)
+    opt_scale_discriminator = Flux.setup(Flux.Optimisers.AdamW(2e-4), scale_discriminator)
+
+    lr_gen_scheduler = ParameterSchedulers.Stateful(Exp(; start=2e-4, decay=0.999))
+    lr_disc_scheduler = ParameterSchedulers.Stateful(Exp(; start=2e-4, decay=0.999))
 
     trainer = Trainer(gpu;
         generator, scale_discriminator, period_discriminator,
         opt_generator, opt_scale_discriminator, opt_period_discriminator,
+        lr_gen_scheduler, lr_disc_scheduler,
         train_loader, test_loader,
         mel_transform=train_dataset.mel_transform_loss,
     )
@@ -76,28 +80,6 @@ function main()
         epochs=3000, save_step=1000, test_step=1000,
         save_dir="/home/pxlth/code/HiFiGAN.jl/runs-2",
     )
-
-    # vlosses = Float32[]
-
-    # # Try loading latest checkpoint.
-    # # TODO load current_step as well
-    # states = readdir(states_dir)
-    # if !isempty(states)
-    #     states = sort(states; by=i -> parse(Int, split(i, "-")[2]))
-    #     ckpt_path = joinpath(states_dir, states[end])
-    #     @info "Loading checkpoint: `$ckpt_path`."
-    #     ckpt = JLD2.load(ckpt_path)
-
-    #     opt_generator = ckpt["opt_generator"]
-    #     opt_period_discriminator = ckpt["opt_period_discriminator"]
-    #     opt_scale_discriminator = ckpt["opt_scale_discriminator"]
-
-    #     Flux.loadmodel!(generator, ckpt["generator"])
-    #     Flux.loadmodel!(period_discriminator, ckpt["period_discriminator"])
-    #     Flux.loadmodel!(scale_discriminator, ckpt["scale_discriminator"])
-
-    #     vlosses = ckpt["vlosses"]
-    # end
     return
 end
 
