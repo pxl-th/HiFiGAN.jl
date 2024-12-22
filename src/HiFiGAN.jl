@@ -74,6 +74,7 @@ function main()
     vlosses = Float32[]
 
     # # Try loading latest checkpoint.
+    # # TODO load current_step as well
     # states = readdir(states_dir)
     # if !isempty(states)
     #     states = sort(states; by=i -> parse(Int, split(i, "-")[2]))
@@ -206,6 +207,7 @@ function train_step(
         ∇G = gback(Δ)
         update && Flux.update!(opt_generator, generator, ∇G[1])
     end
+    hgloss = Array(gloss)[1]
 
     GPUArrays.@cache_scope kab :trainstep begin
         # Discriminators step.
@@ -229,6 +231,7 @@ function train_step(
             Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
         end
     end
+    hdloss = Array(dloss)[1]
 
     AMDGPU.unsafe_free!(wavs)
     AMDGPU.unsafe_free!(mel)
@@ -236,7 +239,7 @@ function train_step(
     AMDGPU.unsafe_free!(wavs_gen)
     AMDGPU.unsafe_free!(Δ)
 
-    return Array(gloss)[1], Array(dloss)[1]
+    return hgloss, hdloss
 end
 
 function validation_step(
@@ -255,6 +258,7 @@ function validation_step(
 
             if i ≤ 4
                 if current_step == 0
+                    # TODO use correct sample_rate
                     save(joinpath(val_dir, "real-$current_step-$i.flac"),
                         reshape(cpu(wavs), size(wavs, 1), 1), 16000)
 
@@ -272,6 +276,57 @@ function validation_step(
     end
     GPUArrays.invalidate_cache_allocator!(kab, :valstep)
     return Array(total_loss)[1] / length(test_loader)
+end
+
+function eval()
+    generator = Generator(;
+        upsample_kernels=[16, 16, 8],
+        upsample_rates=[8, 8, 4],
+        upsample_initial_channels=256,
+
+        resblock_kernels=[3, 5, 7],
+        resblock_dilations=[[1, 2], [2, 6], [3, 12]],
+    ) |> gpu
+
+    ckpt_path = "/home/pxlth/code/HiFiGAN.jl/runs/states/ckpt-81-79000.jld2"
+    ckpt = JLD2.load(ckpt_path)
+    Flux.loadmodel!(generator, ckpt["generator"])
+
+    n_fft = 1024
+    hop_length = n_fft ÷ 4
+    n_freqs = n_fft ÷ 2 + 1
+    sp = Spectrogram(;
+        n_fft, hop_length, center=false,
+        normalized=true, pad=(n_fft - hop_length) ÷ 2)
+    ms = MelScale(; n_mels=80, sample_rate=22050, fmin=0f0, fmax=8000f0)
+    mel_transform = ms ∘ sp
+
+    wav_file = "/home/pxlth/Downloads/LJSpeech-1.1/wavs/LJ001-0001.wav"
+    wav, sample_rate::Int = load(wav_file)
+    wav = Float32.(wav)
+    segment_size = 8192
+
+    wavs = []
+    n_segments = cld(size(wav, 1), segment_size)
+    @show n_segments
+
+    for i in 1:n_segments
+        s = (i - 1) * segment_size + 1
+        e = i * segment_size
+        if e ≤ size(wav, 1)
+            wav_seg = wav[s:e, :]
+        else
+            wav_seg = pad_zeros(wav[s:end, :], (0, e - size(wav, 1)); dims=1)
+        end
+
+        mel = mel_transform(wav_seg) |> gpu
+        wav_gen_seg = generator(mel)
+        push!(wavs, reshape(cpu(wav_gen_seg), size(wav_gen_seg)[1:2]))
+    end
+
+    wav_gen = cat(wavs...; dims=1)
+    save("res.flac", wav_gen, 22050)
+    return
 end
 
 end

@@ -12,7 +12,6 @@ function LJDataset(items;
     n_fft::Int = 1024, n_mels::Int = 80,
     fmin::Float32 = 0f0, fmax::Float32 = 8000f0,
 )
-    n_freqs = n_fft ÷ 2 + 1
     hop_length = n_fft ÷ 4
     sp = Spectrogram(;
         n_fft, hop_length, center=false,
