@@ -4,6 +4,7 @@ struct LJDataset{M}
     mel_transform::M
     mel_transform_loss::M
 
+    sample_rate::Int
     segment_size::Int
 end
 
@@ -21,7 +22,7 @@ function LJDataset(items;
 
     mel_transform = ms ∘ sp
     mel_transform_loss = ms_loss ∘ sp
-    LJDataset(items, mel_transform, mel_transform_loss, segment_size)
+    LJDataset(items, mel_transform, mel_transform_loss, sample_rate, segment_size)
 end
 
 Base.length(d::LJDataset) = length(d.items)

@@ -18,11 +18,14 @@ using Zygote
 import JLD2
 import MLUtils
 
+Maybe{T} = Union{Nothing, T}
+
 include("spectral.jl")
 include("dataset.jl")
 include("generator.jl")
 include("discriminator.jl")
 include("loss.jl")
+include("trainer.jl")
 
 function main()
     kab = ROCBackend()
@@ -35,27 +38,18 @@ function main()
 
     CairoMakie.activate!()
 
-    output_dir = joinpath(homedir(), "code", "HiFiGAN.jl", "runs")
-    states_dir = joinpath(output_dir, "states")
-    val_dir = joinpath(output_dir, "validations")
-    vis_dir = joinpath(output_dir, "visualizations")
-
-    isdir(output_dir) || mkpath(output_dir)
-    isdir(states_dir) || mkpath(states_dir)
-    isdir(val_dir) || mkpath(val_dir)
-    isdir(vis_dir) || mkpath(vis_dir)
-
     files_list = joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv")
     train_files, test_files = load_files(files_list; train_split=0.9)
     train_dataset = LJDataset(train_files)
     test_dataset = LJDataset(test_files)
 
     train_loader = MLUtils.DataLoader(train_dataset;
-        batchsize=12, shuffle=true, partial=false)
+        batchsize=16, shuffle=true, partial=false)
     test_loader = MLUtils.DataLoader(test_dataset; shuffle=false, batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
 
+    # TODO load from config
     generator = Generator(;
         upsample_kernels=[16, 16, 8],
         upsample_rates=[8, 8, 4],
@@ -71,7 +65,19 @@ function main()
     opt_period_discriminator = Flux.setup(AdamW(2e-4), period_discriminator)
     opt_scale_discriminator = Flux.setup(AdamW(2e-4), scale_discriminator)
 
-    vlosses = Float32[]
+    trainer = Trainer(gpu;
+        generator, scale_discriminator, period_discriminator,
+        opt_generator, opt_scale_discriminator, opt_period_discriminator,
+        train_loader, test_loader,
+        mel_transform=train_dataset.mel_transform_loss,
+    )
+    train!(trainer;
+        ckpt_path=nothing,
+        epochs=3000, save_step=1000, test_step=1000,
+        save_dir="/home/pxlth/code/HiFiGAN.jl/runs-2",
+    )
+
+    # vlosses = Float32[]
 
     # # Try loading latest checkpoint.
     # # TODO load current_step as well
@@ -92,190 +98,7 @@ function main()
 
     #     vlosses = ckpt["vlosses"]
     # end
-
-    generator = generator |> gpu
-    period_discriminator = period_discriminator |> gpu
-    scale_discriminator = scale_discriminator |> gpu
-
-    opt_generator = opt_generator |> gpu
-    opt_period_discriminator = opt_period_discriminator |> gpu
-    opt_scale_discriminator = opt_scale_discriminator |> gpu
-
-    steps = 0
-    last_epoch = 0
-    epochs = 3000
-    save_step = 1000
-    test_step = 1000
-
-    mel_transform = gpu(train_dataset.mel_transform_loss)
-    gloss, dloss, vloss = 0f0, 0f0, 0f0
-
-    # Run train step, but do not update the params.
-    # This is done to precompile kernels and reduce memory pressure.
-    @info "Precompiling..."
-    for batch in test_loader
-        train_step(batch,
-            generator, period_discriminator, scale_discriminator;
-            opt_generator, opt_period_discriminator, opt_scale_discriminator,
-            mel_transform, update=false)
-        break
-    end
-    GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
-    GC.gc(false)
-    GC.gc(true)
-    AMDGPU.HIP.reclaim()
-
-    @info "Training for $epochs epochs..."
-    for epoch in (max(1, last_epoch)):epochs
-        bar = Progress(length(train_loader); desc="[$epoch / $epochs] Training")
-        for batch in train_loader
-            gloss, dloss = train_step(batch,
-                generator, period_discriminator, scale_discriminator;
-                opt_generator, opt_period_discriminator, opt_scale_discriminator,
-                mel_transform)
-
-            if steps % test_step == 0
-                GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
-
-                vloss = validation_step(generator, test_loader;
-                    mel_transform, val_dir, vis_dir, current_step=steps)
-                push!(vlosses, vloss)
-
-                if length(vlosses) > 1
-                    fig = lines(vlosses)
-                    save(joinpath(vis_dir, "validation-$epoch-$steps.png"), fig)
-                end
-            end
-
-            if steps % save_step == 0
-                JLD2.jldsave(joinpath(states_dir, "ckpt-$epoch-$steps.jld2");
-                    generator=Flux.state(generator |> cpu),
-                    period_discriminator=Flux.state(period_discriminator |> cpu),
-                    scale_discriminator=Flux.state(scale_discriminator |> cpu),
-
-                    opt_generator=cpu(opt_generator),
-                    opt_period_discriminator=cpu(opt_period_discriminator),
-                    opt_scale_discriminator=cpu(opt_scale_discriminator),
-                    last_epoch, vlosses)
-            end
-
-            next!(bar; showvalues=[(:GLoss, gloss), (:DLoss, dloss), (:VLoss, vloss)])
-            steps += 1
-        end
-        last_epoch = epoch
-    end
     return
-end
-
-function train_step(
-    batch, generator, period_discriminator, scale_discriminator;
-    opt_generator, opt_period_discriminator, opt_scale_discriminator,
-    mel_transform, update::Bool = true,
-)
-    wavs, mel, mel_loss = gpu.(batch)
-    wavs_gen = nothing
-    Δ = gpu([1f0])
-
-    kab = get_backend(wavs)
-    GPUArrays.@cache_scope kab :trainstep begin
-        # Generator step.
-        gloss, gback = Zygote.pullback(generator) do generator
-            ŷ = generator(mel)
-            # Store for the discriminator step.
-            wavs_gen = ignore_derivatives() do
-                GPUArrays.@no_cache_scope copy(ŷ)
-            end
-
-            # Reshape from (n_frames, channels, batch) to (n_frames, batch).
-            ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-            loss_mel = _mae(ŷ_mel, mel_loss)
-
-            period_maps = period_discriminator(wavs)
-            period_gen_maps = period_discriminator(ŷ)
-            loss_period =
-                generator_loss(period_gen_maps) .+
-                2f0 .* feature_loss(period_maps, period_gen_maps)
-
-            scale_maps = scale_discriminator(wavs)
-            scale_gen_maps = scale_discriminator(ŷ)
-            loss_scale =
-                generator_loss(scale_gen_maps) .+
-                2f0 .* feature_loss(scale_maps, scale_gen_maps)
-
-            45f0 .* loss_mel .+ loss_period .+ loss_scale
-        end
-        ∇G = gback(Δ)
-        update && Flux.update!(opt_generator, generator, ∇G[1])
-    end
-    hgloss = Array(gloss)[1]
-
-    GPUArrays.@cache_scope kab :trainstep begin
-        # Discriminators step.
-        dloss, dback = Zygote.pullback(
-            period_discriminator, scale_discriminator,
-        ) do period_discriminator, scale_discriminator
-            period_maps = period_discriminator(wavs)
-            period_gen_maps = period_discriminator(wavs_gen)
-            period_loss = discriminator_loss(period_maps, period_gen_maps)
-
-            scale_maps = scale_discriminator(wavs)
-            scale_gen_maps = scale_discriminator(wavs_gen)
-            scale_loss = discriminator_loss(scale_maps, scale_gen_maps)
-
-            period_loss .+ scale_loss
-        end
-        ∇D = dback(Δ)
-
-        if update
-            Flux.update!(opt_period_discriminator, period_discriminator, ∇D[1])
-            Flux.update!(opt_scale_discriminator, scale_discriminator, ∇D[2])
-        end
-    end
-    hdloss = Array(dloss)[1]
-
-    AMDGPU.unsafe_free!(wavs)
-    AMDGPU.unsafe_free!(mel)
-    AMDGPU.unsafe_free!(mel_loss)
-    AMDGPU.unsafe_free!(wavs_gen)
-    AMDGPU.unsafe_free!(Δ)
-
-    return hgloss, hdloss
-end
-
-function validation_step(
-    generator, test_loader; mel_transform, val_dir, vis_dir, current_step::Int,
-)
-    total_loss = gpu([0f0])
-    kab = get_backend(total_loss)
-    @showprogress desc="Validating" for (i, batch) in enumerate(test_loader)
-        GPUArrays.@cache_scope kab :valstep begin
-            wavs, mel, mel_loss = gpu.(batch)
-
-            ŷ = generator(mel)
-            # Reshape from (n_frames, channels, batch) to (n_frames, batch).
-            ŷ_mel = mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
-            total_loss .+= _mae(ŷ_mel, mel_loss)
-
-            if i ≤ 4
-                if current_step == 0
-                    # TODO use correct sample_rate
-                    save(joinpath(val_dir, "real-$current_step-$i.flac"),
-                        reshape(cpu(wavs), size(wavs, 1), 1), 16000)
-
-                    fig = heatmap(NNlib.power_to_db(cpu(mel_loss))[:, :, 1])
-                    save(joinpath(vis_dir, "mel-real-$current_step-$i.png"), fig)
-                end
-
-                save(joinpath(val_dir, "gen-$current_step-$i.flac"),
-                    reshape(cpu(ŷ), size(ŷ, 1), 1), 16000)
-
-                fig = heatmap(NNlib.power_to_db(cpu(ŷ_mel))[:, :, 1])
-                save(joinpath(vis_dir, "mel-gen-$current_step-$i.png"), fig)
-            end
-        end
-    end
-    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
-    return Array(total_loss)[1] / length(test_loader)
 end
 
 function eval()
