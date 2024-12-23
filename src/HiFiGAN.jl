@@ -18,6 +18,7 @@ using Zygote
 
 import JLD2
 import MLUtils
+import Optimisers
 
 Maybe{T} = Union{Nothing, T}
 
@@ -29,15 +30,13 @@ include("loss.jl")
 include("trainer.jl")
 
 function main()
+    CairoMakie.activate!()
+
     kab = ROCBackend()
     GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
     GPUArrays.invalidate_cache_allocator!(kab, :valstep)
-
     GC.gc(false)
     GC.gc(true)
-    AMDGPU.HIP.reclaim()
-
-    CairoMakie.activate!()
 
     files_list = joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv")
     train_files, test_files = load_files(files_list; train_split=0.9)
@@ -61,9 +60,9 @@ function main()
     period_discriminator = MultiPeriodDiscriminator()
     scale_discriminator = MultiScaleDiscriminator()
 
-    opt_generator = Flux.setup(Flux.Optimisers.AdamW(2e-4), generator)
-    opt_period_discriminator = Flux.setup(Flux.Optimisers.AdamW(2e-4), period_discriminator)
-    opt_scale_discriminator = Flux.setup(Flux.Optimisers.AdamW(2e-4), scale_discriminator)
+    opt_generator = Flux.setup(Optimisers.AdamW(2e-4), generator)
+    opt_period_discriminator = Flux.setup(Optimisers.AdamW(2e-4), period_discriminator)
+    opt_scale_discriminator = Flux.setup(Optimisers.AdamW(2e-4), scale_discriminator)
 
     lr_gen_scheduler = ParameterSchedulers.Stateful(Exp(; start=2e-4, decay=0.999))
     lr_disc_scheduler = ParameterSchedulers.Stateful(Exp(; start=2e-4, decay=0.999))
@@ -78,12 +77,17 @@ function main()
     train!(trainer;
         ckpt_path=nothing,
         epochs=3000, save_step=1000, test_step=1000,
-        save_dir="/home/pxlth/code/HiFiGAN.jl/runs-2",
+        save_dir="/home/pxlth/code/HiFiGAN.jl/runs/2",
     )
     return
 end
 
 function eval()
+    in_dir = "/home/pxlth/Downloads/LJSpeech-1.1/test/"
+    out_dir = "/home/pxlth/Downloads/LJSpeech-1.1/eval-test/"
+    isdir(out_dir) || mkpath(out_dir)
+    ckpt_path = "/home/pxlth/code/HiFiGAN.jl/runs/states/ckpt-81-79000.jld2"
+
     generator = Generator(;
         upsample_kernels=[16, 16, 8],
         upsample_rates=[8, 8, 4],
@@ -93,9 +97,11 @@ function eval()
         resblock_dilations=[[1, 2], [2, 6], [3, 12]],
     ) |> gpu
 
-    ckpt_path = "/home/pxlth/code/HiFiGAN.jl/runs/states/ckpt-81-79000.jld2"
     ckpt = JLD2.load(ckpt_path)
     Flux.loadmodel!(generator, ckpt["generator"])
+
+    sample_rate = 22050
+    segment_size = 8192
 
     n_fft = 1024
     hop_length = n_fft ÷ 4
@@ -103,34 +109,37 @@ function eval()
     sp = Spectrogram(;
         n_fft, hop_length, center=false,
         normalized=true, pad=(n_fft - hop_length) ÷ 2)
-    ms = MelScale(; n_mels=80, sample_rate=22050, fmin=0f0, fmax=8000f0)
+    ms = MelScale(; n_mels=80, sample_rate, fmin=0f0, fmax=8000f0)
     mel_transform = ms ∘ sp
 
-    wav_file = "/home/pxlth/Downloads/LJSpeech-1.1/wavs/LJ001-0001.wav"
-    wav, sample_rate::Int = load(wav_file)
-    wav = Float32.(wav)
-    segment_size = 8192
+    for file in readdir(in_dir)
+        endswith(file, ".wav") || endswith(file, ".flac") || continue
 
-    wavs = []
-    n_segments = cld(size(wav, 1), segment_size)
-    @show n_segments
+        wav, sr = load(joinpath(in_dir, file))
+        wav = Float32.(wav)
 
-    for i in 1:n_segments
-        s = (i - 1) * segment_size + 1
-        e = i * segment_size
-        if e ≤ size(wav, 1)
-            wav_seg = wav[s:e, :]
-        else
-            wav_seg = pad_zeros(wav[s:end, :], (0, e - size(wav, 1)); dims=1)
+        wavs = []
+        n_segments = cld(size(wav, 1), segment_size)
+        for i in 1:n_segments
+            s = (i - 1) * segment_size + 1
+            e = i * segment_size
+            if e ≤ size(wav, 1)
+                wav_seg = wav[s:e, :]
+            else
+                wav_seg = pad_zeros(wav[s:end, :], (0, e - size(wav, 1)); dims=1)
+            end
+
+            mel = mel_transform(wav_seg) |> gpu
+            wav_gen_seg = generator(mel)
+            # TODO trim padding
+            push!(wavs, reshape(cpu(wav_gen_seg), size(wav_gen_seg)[1:2]))
         end
 
-        mel = mel_transform(wav_seg) |> gpu
-        wav_gen_seg = generator(mel)
-        push!(wavs, reshape(cpu(wav_gen_seg), size(wav_gen_seg)[1:2]))
+        wav_gen = cat(wavs...; dims=1)
+        save(
+            joinpath(out_dir, replace(file, ".wav" => ".flac")),
+            wav_gen, sample_rate)
     end
-
-    wav_gen = cat(wavs...; dims=1)
-    save("res.flac", wav_gen, 22050)
     return
 end
 

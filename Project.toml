@@ -17,6 +17,7 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 MLUtils = "f1d291b0-491e-4a28-83b9-f70985020b54"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"
 ParameterSchedulers = "d7d3b36b-41b8-4d0d-a2bf-768c6151755e"
 ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
@@ -28,4 +29,5 @@ Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
 ChainRulesCore = "1.25.0"
+Optimisers = "0.4.2"
 ParameterSchedulers = "0.4.3"

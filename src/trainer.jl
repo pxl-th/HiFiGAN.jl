@@ -87,10 +87,17 @@ function train!(trainer::Trainer;
 
         trainer.lr_gen_scheduler.state = ckpt["lr_gen_scheduler"]
         trainer.lr_disc_scheduler.state = ckpt["lr_disc_scheduler"]
-        # TODO update optimizers
 
-        trainer.current_step = get(ckpt, "current_step", 0)
-        trainer.current_epoch = get(ckpt, "current_epoch", 0)
+        # Update optimizers with schedulers.
+        Optimisers.adjust!(trainer.opt_generator,
+            trainer.lr_gen_scheduler.schedule(trainer.lr_gen_scheduler.state))
+        Optimisers.adjust!(trainer.opt_scale_discriminator,
+            trainer.lr_disc_scheduler.schedule(trainer.lr_disc_scheduler.state))
+        Optimisers.adjust!(trainer.opt_period_discriminator,
+            trainer.lr_disc_scheduler.schedule(trainer.lr_disc_scheduler.state))
+
+        trainer.current_step = ckpt["current_step"]
+        trainer.current_epoch = ckpt["current_epoch"]
 
         vlosses = ckpt["vlosses"]
         vloss = vlosses[end]
@@ -141,17 +148,18 @@ function train!(trainer::Trainer;
                 (:gen_loss, gloss),
                 (:disc_loss, dloss),
                 (:val_loss, vloss),
-                (:lr_gen, trainer.opt_generator.eta),
-                (:lr_disc, trainer.opt_scale_discriminator.eta),
+                (:lr_gen, trainer.lr_gen_scheduler.schedule(trainer.lr_gen_scheduler.state)),
+                (:lr_disc, trainer.lr_disc_scheduler.schedule(trainer.lr_disc_scheduler.state)),
             ])
             trainer.current_step += 1
-            break
         end
 
-        # trainer.opt_generator.eta = ParameterSchedulers.next!(trainer.lr_gen_scheduler)
-        # lr_disc = ParameterSchedulers.next!(trainer.lr_disc_scheduler)
-        # trainer.opt_scale_discriminator.eta = lr_disc
-        # trainer.opt_period_discriminator.eta = lr_disc
+        Optimisers.adjust!(trainer.opt_generator,
+            ParameterSchedulers.next!(trainer.lr_gen_scheduler))
+
+        lr_disc = ParameterSchedulers.next!(trainer.lr_disc_scheduler)
+        Optimisers.adjust!(trainer.opt_scale_discriminator, lr_disc)
+        Optimisers.adjust!(trainer.opt_period_discriminator, lr_disc)
 
         trainer.current_epoch += 1
     end
