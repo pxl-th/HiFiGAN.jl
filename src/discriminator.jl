@@ -4,6 +4,34 @@ struct PeriodDiscriminator{C}
 end
 Flux.@layer PeriodDiscriminator
 
+struct DCONV{C}
+    c::C
+end
+Flux.@layer DCONV
+
+conv_no_weight(x, w, cdims; kwargs...) = Flux.conv(x, w, cdims; kwargs...)
+
+function ChainRulesCore.rrule(::typeof(conv_no_weight), x, w, cdims; kwargs...)
+    function _pullback(Δ)
+        return (
+            ChainRulesCore.NoTangent(),
+            @thunk(Flux.∇conv_data(unthunk(Δ), w, cdims, kwargs...)),
+            @thunk(begin
+                @info ">>> WEIGHT <<<"
+                st = stacktrace()
+                @show length(st)
+                display(st[1:20]); println()
+                println()
+                Flux.∇conv_filter(x, unthunk(Δ), cdims, kwargs...)
+            end),
+            ChainRulesCore.NoTangent(),
+        )
+    end
+    return conv_no_weight(x, w, cdims; kwargs...), _pullback
+end
+
+(d::DCONV)(x) = conv_no_weight(x, d.c.weight, Flux.conv_dims(d.c, x))
+
 function PeriodDiscriminator(period::Int; kernel::Int = 5, stride::Int = 3)
     pad = (get_padding(kernel, 1), 0)
     act = leakyrelu

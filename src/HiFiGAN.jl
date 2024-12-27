@@ -5,7 +5,7 @@ using KernelAbstractions
 using NNlib
 using Makie
 using CairoMakie
-using ChainRulesCore: ignore_derivatives
+using ChainRulesCore: ignore_derivatives, @thunk, unthunk
 using GPUArrays
 using Flux
 using ParameterSchedulers
@@ -16,6 +16,7 @@ using Statistics
 using ProgressMeter
 using Zygote
 
+import ChainRulesCore
 import JLD2
 import MLUtils
 import Optimisers
@@ -44,7 +45,7 @@ function main()
     test_dataset = LJDataset(test_files)
 
     train_loader = MLUtils.DataLoader(train_dataset;
-        batchsize=16, shuffle=true, partial=false)
+        batchsize=24, shuffle=true, partial=false)
     test_loader = MLUtils.DataLoader(test_dataset; shuffle=false, batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
@@ -76,7 +77,7 @@ function main()
     )
     train!(trainer;
         ckpt_path=nothing,
-        epochs=3000, save_step=1000, test_step=1000,
+        epochs=3000, save_step=5000, test_step=5000,
         save_dir="/home/pxlth/code/HiFiGAN.jl/runs/2",
     )
     return

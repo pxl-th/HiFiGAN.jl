@@ -166,68 +166,70 @@ function train!(trainer::Trainer;
     return
 end
 
-function train_step!(trainer::Trainer, batch; update::Bool = true)
+function train_step!(trainer::Trainer, batch)
     wavs, mel, mel_loss = trainer.device.(batch)
     kab = get_backend(wavs)
     Δ = trainer.device([1f0])
 
     wavs_gen = nothing
+
+    # NOTE
+    # Create alias, otherwise Zygote computes grads w.r.t. PD in generator step.
+    #
+    # TODO make Zygote.lib.accum(::Thunk, ::Thunk) produce another Thunk?
+    pd = trainer.period_discriminator
+    sd = trainer.scale_discriminator
+    mt = trainer.mel_transform
+    gen = trainer.generator
+
+    # Generator step.
     GPUArrays.@cache_scope kab :trainstep begin
-        # Generator step.
-        gloss, gback = Zygote.pullback(trainer.generator) do generator
-            ŷ = generator(mel)
+        gloss, gback = Zygote.pullback(gen) do gen
+            ŷ = gen(mel)
             # Store for the discriminator step.
-            wavs_gen = ignore_derivatives() do
-                GPUArrays.@no_cache_scope copy(ŷ)
-            end
+            wavs_gen = ignore_derivatives(() -> GPUArrays.@no_cache_scope copy(ŷ))
 
             # Reshape from (n_frames, channels, batch) to (n_frames, batch).
-            ŷ_mel = trainer.mel_transform(reshape(ŷ, (size(ŷ)[[1, 3]])))
+            ŷ_mel = mt(reshape(ŷ, (size(ŷ)[[1, 3]])))
             loss_mel = _mae(ŷ_mel, mel_loss)
 
-            period_maps = trainer.period_discriminator(wavs)
-            period_gen_maps = trainer.period_discriminator(ŷ)
+            pd_maps = pd(wavs)
+            pd_gen_maps = pd(ŷ)
             loss_period =
-                generator_loss(period_gen_maps) .+
-                2f0 .* feature_loss(period_maps, period_gen_maps)
+                generator_loss(pd_gen_maps) #.+
+                2f0 .* feature_loss(pd_maps, pd_gen_maps)
 
-            scale_maps = trainer.scale_discriminator(wavs)
-            scale_gen_maps = trainer.scale_discriminator(ŷ)
+            sd_maps = sd(wavs)
+            sd_gen_maps = sd(ŷ)
             loss_scale =
-                generator_loss(scale_gen_maps) .+
-                2f0 .* feature_loss(scale_maps, scale_gen_maps)
+                generator_loss(sd_gen_maps) .+
+                2f0 .* feature_loss(sd_maps, sd_gen_maps)
 
             45f0 .* loss_mel .+ loss_period .+ loss_scale
         end
+        hgloss = Array(gloss)[1]
         ∇G = gback(Δ)
-        update && Flux.update!(trainer.opt_generator, trainer.generator, ∇G[1])
+        Flux.update!(trainer.opt_generator, gen, ∇G[1])
     end
-    hgloss = Array(gloss)[1]
 
+    # Discriminators step.
     GPUArrays.@cache_scope kab :trainstep begin
-        # Discriminators step.
-        dloss, dback = Zygote.pullback(
-            trainer.period_discriminator,
-            trainer.scale_discriminator,
-        ) do period_discriminator, scale_discriminator
-            period_maps = period_discriminator(wavs)
-            period_gen_maps = period_discriminator(wavs_gen)
-            period_loss = discriminator_loss(period_maps, period_gen_maps)
+        dloss, dback = Zygote.pullback(pd, sd) do pd, sd
+            pd_maps = pd(wavs)
+            pd_gen_maps = pd(wavs_gen)
+            pd_loss = discriminator_loss(pd_maps, pd_gen_maps)
 
-            scale_maps = scale_discriminator(wavs)
-            scale_gen_maps = scale_discriminator(wavs_gen)
-            scale_loss = discriminator_loss(scale_maps, scale_gen_maps)
+            sd_maps = sd(wavs)
+            sd_gen_maps = sd(wavs_gen)
+            sd_loss = discriminator_loss(sd_maps, sd_gen_maps)
 
-            period_loss .+ scale_loss
+            pd_loss .+ sd_loss
         end
+        hdloss = Array(dloss)[1]
         ∇D = dback(Δ)
-
-        if update
-            Flux.update!(trainer.opt_period_discriminator, trainer.period_discriminator, ∇D[1])
-            Flux.update!(trainer.opt_scale_discriminator, trainer.scale_discriminator, ∇D[2])
-        end
+        Flux.update!(trainer.opt_period_discriminator, pd, ∇D[1])
+        Flux.update!(trainer.opt_scale_discriminator, sd, ∇D[2])
     end
-    hdloss = Array(dloss)[1]
 
     unsafe_free!(wavs)
     unsafe_free!(mel)
