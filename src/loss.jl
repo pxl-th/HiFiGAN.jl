@@ -1,6 +1,6 @@
 _loss1(x) = mean((1f0 .- x).^2; dims=(1:ndims(x)...,))
 _loss2(x) = mean(x.^2; dims=(1:ndims(x)...,))
-_mae(a, b) = mean(abs.(a .- b); dims=(1:ndims(a)...,))
+_mae(a, b) = mean(abs.(a .- b .+ eps(eltype(a))); dims=(1:ndims(a)...,))
 
 function discriminator_loss(maps, gen_maps)
     # Discriminator should recognize real waveforms (yr = 1),
