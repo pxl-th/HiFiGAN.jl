@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
@@ -28,6 +29,7 @@ WAV = "8149f6b0-98f6-5db9-b78f-408fbbb8ef88"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
+AbstractFFTs = "1.5.0"
 ChainRulesCore = "1.25.0"
 Optimisers = "0.4.2"
 ParameterSchedulers = "0.4.3"

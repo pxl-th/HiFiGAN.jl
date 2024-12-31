@@ -10,7 +10,7 @@ struct Spectrogram{W}
     normalized::Bool
     window_normalized::Bool
 end
-Flux.@layer Spectrogram
+Flux.@layer Spectrogram trainable=()
 
 function Spectrogram(;
     n_fft::Int = 1024, hop_length::Int = n_fft ÷ 4, pad::Int = 0,
@@ -35,7 +35,7 @@ end
 struct MelScale{F}
     filterbanks::F
 end
-Flux.@layer MelScale
+Flux.@layer MelScale trainable=()
 
 """
     MelScale(;

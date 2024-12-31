@@ -173,10 +173,6 @@ function train_step!(trainer::Trainer, batch)
 
     wavs_gen = nothing
 
-    # NOTE
-    # Create alias, otherwise Zygote computes grads w.r.t. PD in generator step.
-    #
-    # TODO make Zygote.lib.accum(::Thunk, ::Thunk) produce another Thunk?
     pd = trainer.period_discriminator
     sd = trainer.scale_discriminator
     mt = trainer.mel_transform
@@ -196,7 +192,7 @@ function train_step!(trainer::Trainer, batch)
             pd_maps = pd(wavs)
             pd_gen_maps = pd(ŷ)
             loss_period =
-                generator_loss(pd_gen_maps) #.+
+                generator_loss(pd_gen_maps) .+
                 2f0 .* feature_loss(pd_maps, pd_gen_maps)
 
             sd_maps = sd(wavs)
@@ -208,6 +204,7 @@ function train_step!(trainer::Trainer, batch)
             45f0 .* loss_mel .+ loss_period .+ loss_scale
         end
         hgloss = Array(gloss)[1]
+        @assert !isnan(hgloss)
         ∇G = gback(Δ)
         Flux.update!(trainer.opt_generator, gen, ∇G[1])
     end
@@ -226,6 +223,7 @@ function train_step!(trainer::Trainer, batch)
             pd_loss .+ sd_loss
         end
         hdloss = Array(dloss)[1]
+        @assert !isnan(hdloss)
         ∇D = dback(Δ)
         Flux.update!(trainer.opt_period_discriminator, pd, ∇D[1])
         Flux.update!(trainer.opt_scale_discriminator, sd, ∇D[2])

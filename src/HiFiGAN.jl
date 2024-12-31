@@ -16,6 +16,7 @@ using Statistics
 using ProgressMeter
 using Zygote
 
+import AbstractFFTs
 import ChainRulesCore
 import JLD2
 import MLUtils
@@ -45,7 +46,7 @@ function main()
     test_dataset = LJDataset(test_files)
 
     train_loader = MLUtils.DataLoader(train_dataset;
-        batchsize=24, shuffle=true, partial=false)
+        batchsize=16, shuffle=true, partial=false)
     test_loader = MLUtils.DataLoader(test_dataset; shuffle=false, batchsize=1)
     @info "Train loader length: $(length(train_loader))"
     @info "Test loader length: $(length(test_loader))"
@@ -142,6 +143,34 @@ function eval()
             wav_gen, sample_rate)
     end
     return
+end
+
+function mm()
+    n_fft = 1024
+    hop_length = n_fft ÷ 4
+    # sp = Spectrogram(;
+    #     n_fft, hop_length, center=false,
+    #     normalized=true, pad=(n_fft - hop_length) ÷ 2) |> gpu
+
+    for i in 1:2
+        @show i
+        # x = rand(Float32, 8192, 1) |> gpu
+        # AbstractFFTs.fft(x, 1)
+        # Zygote.gradient(x) do x
+        #     abs.(sum(AbstractFFTs.fft(x))).^2
+        # end
+
+        x = rand(Float32, 8192, 1, 1) |> gpu
+        Zygote.gradient(x) do x
+            abs(sum(NNlib.stft(x; n_fft, hop_length)))
+        end
+
+        GC.gc(false)
+        GC.gc(true)
+    end
+
+    @show AMDGPU.rocFFT.IDLE_HANDLES.idle_handles |> length
+    @show AMDGPU.rocFFT.IDLE_HANDLES.active_handles |> length
 end
 
 end
