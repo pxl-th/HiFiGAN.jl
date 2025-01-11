@@ -33,12 +33,7 @@ include("trainer.jl")
 
 function main()
     CairoMakie.activate!()
-
     kab = ROCBackend()
-    GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
-    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
-    GC.gc(false)
-    GC.gc(true)
 
     files_list = joinpath(homedir(), "Downloads", "LJSpeech-1.1", "metadata.csv")
     train_files, test_files = load_files(files_list; train_split=0.9)

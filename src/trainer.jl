@@ -15,6 +15,7 @@ Base.@kwdef mutable struct Trainer{M1, M2, M3, O1, O2, O3, S1, S2, L, T, D}
     mel_transform::T
 
     device::D
+    cache::GPUArrays.AllocCache
 
     current_step::Int
     current_epoch::Int
@@ -43,6 +44,7 @@ function Trainer(device;
         train_loader.data.mel_transform |> device,
 
         device,
+        GPUArrays.AllocCache(),
 
         0, 0,
     )
@@ -56,12 +58,6 @@ function train!(trainer::Trainer;
     save_dir::String = ".",
 )
     kab = get_backend(trainer.device(Array{Int}(undef, 0)))
-
-    # Cleanup any previous runs.
-    GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
-    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
-    GC.gc(false)
-    GC.gc(true)
 
     ckpt_dir = joinpath(save_dir, "checkpoints")
     vis_dir = joinpath(save_dir, "visualizations")
@@ -112,7 +108,6 @@ function train!(trainer::Trainer;
             gloss, dloss = train_step!(trainer, batch)
 
             if trainer.current_step % test_step == 0
-                GPUArrays.invalidate_cache_allocator!(kab, :trainstep)
                 vloss = validation_step(trainer; demo_dir, vis_dir)
                 push!(vlosses, vloss)
 
@@ -179,11 +174,11 @@ function train_step!(trainer::Trainer, batch)
     gen = trainer.generator
 
     # Generator step.
-    GPUArrays.@cache_scope kab :trainstep begin
+    GPUArrays.@cached trainer.cache begin
         gloss, gback = Zygote.pullback(gen) do gen
             ŷ = gen(mel)
             # Store for the discriminator step.
-            wavs_gen = ignore_derivatives(() -> GPUArrays.@no_cache_scope copy(ŷ))
+            wavs_gen = ignore_derivatives(() -> GPUArrays.@uncached copy(ŷ))
 
             # Reshape from (n_frames, channels, batch) to (n_frames, batch).
             ŷ_mel = mt(reshape(ŷ, (size(ŷ)[[1, 3]])))
@@ -210,7 +205,7 @@ function train_step!(trainer::Trainer, batch)
     end
 
     # Discriminators step.
-    GPUArrays.@cache_scope kab :trainstep begin
+    GPUArrays.@cached trainer.cache begin
         dloss, dback = Zygote.pullback(pd, sd) do pd, sd
             pd_maps = pd(wavs)
             pd_gen_maps = pd(wavs_gen)
@@ -239,12 +234,14 @@ function train_step!(trainer::Trainer, batch)
 end
 
 function validation_step(trainer; demo_dir::String, vis_dir::String)
+    GPUArrays.unsafe_free!(trainer.cache)
+
     total_loss = trainer.device([0f0])
     kab = get_backend(total_loss)
     sample_rate = trainer.test_loader.data.sample_rate
 
     @showprogress desc="Validating" for (i, batch) in enumerate(trainer.test_loader)
-        GPUArrays.@cache_scope kab :valstep begin
+        GPUArrays.@cached trainer.cache begin
             wavs, mel, mel_loss = trainer.device.(batch)
 
             ŷ = trainer.generator(mel)
@@ -271,6 +268,6 @@ function validation_step(trainer; demo_dir::String, vis_dir::String)
             end
         end
     end
-    GPUArrays.invalidate_cache_allocator!(kab, :valstep)
+    GPUArrays.unsafe_free!(trainer.cache)
     return Array(total_loss)[1] / length(trainer.test_loader)
 end
